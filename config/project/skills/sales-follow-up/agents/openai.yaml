@@ -1,0 +1,3 @@
+interface:
+  display_name: "Follow-up клиенту"
+  short_description: "Пишет клиентские письма и сообщения после встреч и звонков."

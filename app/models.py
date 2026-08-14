@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from enum import StrEnum
+
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db import Base
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+class AccessStatus(StrEnum):
+    pending = "pending"
+    active = "active"
+    revoked = "revoked"
+
+
+class JobStatus(StrEnum):
+    queued = "queued"
+    processing = "processing"
+    done = "done"
+    failed = "failed"
+
+
+class UserAccess(Base):
+    __tablename__ = "user_access"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    telegram_username: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    corporate_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    corporate_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default=AccessStatus.pending, index=True)
+    role: Mapped[str] = mapped_column(String(64), default="pilot_user")
+    allowed_tools_json: Mapped[str] = mapped_column(Text, default="[]")
+    request_number: Mapped[str] = mapped_column(String(32), unique=True)
+    daily_request_limit: Mapped[int] = mapped_column(Integer, default=50)
+    daily_token_limit: Mapped[int] = mapped_column(Integer, default=250_000)
+    daily_cost_limit_usd: Mapped[float] = mapped_column(Float, default=10.0)
+    approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class UpdateJob(Base):
+    __tablename__ = "update_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    update_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    kind: Mapped[str] = mapped_column(String(32), default="message")
+    payload_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default=JobStatus.queued, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UsageEvent(Base):
+    __tablename__ = "usage_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+    user_hash: Mapped[str] = mapped_column(String(80), index=True)
+    request_id: Mapped[str] = mapped_column(String(128), unique=True)
+    scenario: Mapped[str] = mapped_column(String(64), default="sales_default")
+    result: Mapped[str] = mapped_column(String(32))
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    model: Mapped[str] = mapped_column(String(128))
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class AdminAudit(Base):
+    __tablename__ = "admin_audit"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+    admin_name: Mapped[str] = mapped_column(String(128))
+    action: Mapped[str] = mapped_column(String(64))
+    target_telegram_user_id: Mapped[int] = mapped_column(BigInteger)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+

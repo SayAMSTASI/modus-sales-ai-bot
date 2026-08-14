@@ -1,0 +1,3 @@
+interface:
+  display_name: "MEDDPICC сделки"
+  short_description: "Оценивает сделку по MEDDPICC и определяет готовность MQL/SQL."

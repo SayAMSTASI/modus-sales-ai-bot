@@ -1,0 +1,63 @@
+[
+  {
+    "server_label": "jira",
+    "server_description": "Modus Jira MCP; tools disabled until read-only discovery",
+    "server_url": "https://mcp.modusbi.ru/jira/mcp",
+    "authorization_type": "oauth",
+    "authorization_env": "JIRA_MCP_ACCESS_TOKEN",
+    "oauth_issuer": "https://auth.modusbi.ru/realms/master",
+    "oauth_device_authorization_endpoint": "https://auth.modusbi.ru/realms/master/protocol/openid-connect/auth/device",
+    "oauth_token_endpoint": "https://auth.modusbi.ru/realms/master/protocol/openid-connect/token",
+    "oauth_client_id_env": "MODUSBI_MCP_OAUTH_CLIENT_ID",
+    "allowed_tools": [
+      "jira_get_issue",
+      "jira_search",
+      "jira_get_all_projects"
+    ],
+    "read_only": true,
+    "app_version_name": "dev mode",
+    "app_version_notes": "dev-3",
+    "app_version_id": "asdk_app_v_69fd1f224be881919146244d76e55c45",
+    "app_id": "asdk_app_69fd1f2072c48191bbf476d7844534f8",
+    "review_status": "development",
+    "connected_at": "2026-05-08"
+  },
+  {
+    "server_label": "bitrix",
+    "server_description": "Modus Bitrix MCP; tools disabled until read-only discovery",
+    "server_url": "https://mcp.modusbi.ru/bitrix/mcp",
+    "authorization_type": "oauth",
+    "authorization_env": "BITRIX_MCP_ACCESS_TOKEN",
+    "oauth_issuer": "https://auth.modusbi.ru/realms/master",
+    "oauth_device_authorization_endpoint": "https://auth.modusbi.ru/realms/master/protocol/openid-connect/auth/device",
+    "oauth_token_endpoint": "https://auth.modusbi.ru/realms/master/protocol/openid-connect/token",
+    "oauth_client_id_env": "MODUSBI_MCP_OAUTH_CLIENT_ID",
+    "allowed_tools": [],
+    "read_only": true,
+    "app_version_name": "dev mode",
+    "app_version_notes": "dev-2",
+    "app_version_id": "asdk_app_v_69fd20d2aad481919b705761cba3d03f",
+    "app_id": "asdk_app_69fd20d1029c8191a8b945cadf46dc03",
+    "review_status": "development",
+    "connected_at": "2026-05-08"
+  },
+  {
+    "server_label": "ktalk",
+    "server_description": "Modus KTalk MCP; tools disabled until read-only discovery",
+    "server_url": "https://mcp.modusbi.ru/ktalk/mcp",
+    "authorization_type": "oauth",
+    "authorization_env": "KTALK_MCP_ACCESS_TOKEN",
+    "oauth_issuer": "https://auth.modusbi.ru/realms/master",
+    "oauth_device_authorization_endpoint": "https://auth.modusbi.ru/realms/master/protocol/openid-connect/auth/device",
+    "oauth_token_endpoint": "https://auth.modusbi.ru/realms/master/protocol/openid-connect/token",
+    "oauth_client_id_env": "MODUSBI_MCP_OAUTH_CLIENT_ID",
+    "allowed_tools": [],
+    "read_only": true,
+    "app_version_name": "dev mode",
+    "app_version_notes": "dev-3",
+    "app_version_id": "asdk_app_v_69fd203d06f08191802547654f88b464",
+    "app_id": "asdk_app_69fd203aeecc8191bec45c2f606190a0",
+    "review_status": "development",
+    "connected_at": "2026-05-08"
+  }
+]

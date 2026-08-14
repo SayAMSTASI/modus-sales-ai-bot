@@ -1,0 +1,3 @@
+interface:
+  display_name: "Bitrix CRM обновление"
+  short_description: "Готовит безопасные CRM-заметки и будущую запись через MCP."
