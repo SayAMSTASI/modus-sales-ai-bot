@@ -19,7 +19,7 @@ def main() -> None:
         json={
             "url": f"{args.url.rstrip('/')}/telegram/webhook",
             "secret_token": secret,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],
             "drop_pending_updates": False,
         },
         timeout=20,
@@ -33,4 +33,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

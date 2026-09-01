@@ -34,6 +34,33 @@ def extract_update(update: dict[str, Any]) -> tuple[int, int, int, str, str | No
     return update_id, user_id, chat_id, str(chat_type), message.get("text")
 
 
+def extract_callback(update: dict[str, Any]) -> tuple[int, int, int, str, str] | None:
+    update_id = update.get("update_id")
+    callback = update.get("callback_query")
+    if not isinstance(update_id, int) or not isinstance(callback, dict):
+        return None
+    sender = callback.get("from") or {}
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    user_id = sender.get("id")
+    chat_id = chat.get("id")
+    chat_type = chat.get("type")
+    callback_id = callback.get("id")
+    data = callback.get("data")
+    if not all(
+        [
+            isinstance(user_id, int),
+            isinstance(chat_id, int),
+            isinstance(callback_id, str),
+            isinstance(data, str),
+        ]
+    ):
+        return None
+    if chat_type != "private" or user_id != chat_id:
+        return None
+    return update_id, user_id, chat_id, callback_id, data
+
+
 def _local_allowed_tools(settings: Settings) -> str:
     tools = [
         f"{server.server_label}:{tool}"
@@ -70,6 +97,26 @@ def ingest_update(
     auto_approve_local_owner: bool = False,
 ) -> dict[str, Any]:
     parsed = extract_update(update)
+    callback = extract_callback(update)
+    if parsed is None and callback is not None:
+        update_id, user_id, chat_id, callback_id, data = callback
+        with factory() as session:
+            if session.scalar(select(UpdateJob).where(UpdateJob.update_id == update_id)):
+                return {"ok": True, "accepted": False, "reason": "duplicate"}
+            session.add(
+                UpdateJob(
+                    update_id=update_id,
+                    telegram_user_id=user_id,
+                    chat_id=chat_id,
+                    kind="callback",
+                    payload_text=json.dumps(
+                        {"callback_query_id": callback_id, "data": data},
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+            session.commit()
+        return {"ok": True, "accepted": True}
     if parsed is None:
         return {"ok": True, "accepted": False, "reason": "unsupported_update"}
     update_id, user_id, chat_id, chat_type, text = parsed
@@ -89,12 +136,20 @@ def ingest_update(
             else ""
         )
 
+        created = False
         if command == "/start" and user is None:
-            auto_approve = auto_approve_local_owner and _can_auto_approve_local_owner(
-                session,
-                settings,
-                user_id,
-                user_exists=False,
+            auto_approve = (
+                user_id in settings.admin_ids()
+                or user_id in settings.pilot_ids()
+                or (
+                    auto_approve_local_owner
+                    and _can_auto_approve_local_owner(
+                        session,
+                        settings,
+                        user_id,
+                        user_exists=False,
+                    )
+                )
             )
             user = UserAccess(
                 telegram_user_id=user_id,
@@ -105,11 +160,12 @@ def ingest_update(
                 role="pilot_user",
                 allowed_tools_json=_local_allowed_tools(settings) if auto_approve else "[]",
                 request_number=_request_number(user_id),
-                approved_by="local_first_user" if auto_approve else None,
+                approved_by="configured_allowlist" if auto_approve else None,
                 approved_at=datetime.now(UTC) if auto_approve else None,
             )
             session.add(user)
             session.flush()
+            created = True
         elif user is not None:
             user.chat_id = chat_id
             user.telegram_username = username
@@ -126,22 +182,36 @@ def ingest_update(
             ):
                 user.status = AccessStatus.active
                 user.allowed_tools_json = _local_allowed_tools(settings)
-                user.approved_by = "local_first_user"
+                user.approved_by = "configured_allowlist"
                 user.approved_at = datetime.now(UTC)
             elif (
                 command == "/start"
                 and user.status == AccessStatus.active
                 and auto_approve_local_owner
-                and user.approved_by == "local_first_user"
+                and user.approved_by in {"local_first_user", "configured_allowlist"}
             ):
                 # Refresh the local owner's permissions after MCP configuration changes.
                 user.allowed_tools_json = _local_allowed_tools(settings)
 
         kind = "message"
         payload = text if isinstance(text, str) else None
-        if command in {"/start", "/help", "/new"}:
+        if command in {
+            "/start",
+            "/help",
+            "/new",
+            "/login",
+            "/logout",
+            "/skills",
+            "/skill_show",
+            "/skill_edit",
+            "/skill_cancel",
+            "/skill_rollback",
+        }:
             kind = command[1:]
-            payload = None
+            payload = "new" if command == "/start" and created else None
+        elif command == "/revoke":
+            kind = "revoke"
+            payload = text.removeprefix("/revoke").strip() if isinstance(text, str) else ""
         elif text is None:
             kind = "unsupported"
             payload = None
@@ -167,7 +237,6 @@ def ingest_update(
                         {"server": parts[1].lower(), "query": parts[2]},
                         ensure_ascii=False,
                     )
-
         session.add(
             UpdateJob(
                 update_id=update_id,

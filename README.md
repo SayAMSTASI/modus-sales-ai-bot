@@ -1,121 +1,112 @@
-# Telegram-пилот sales AI-агента
+# Modus Sales Telegram Bot — MVP
 
-Рабочий минимальный контур для проверки удобства и токенной экономики до любых доработок Bitrix24. По умолчанию запускается бесплатный `mock`-режим; боевые Telegram, OpenAI и MCP включаются только через секреты и явную конфигурацию.
+Локальный Telegram-бот с OpenAI Responses API, общим набором skills и персональным доступом к Jira, Bitrix и KTalk MCP через Keycloak. Web-админки, ролей, индивидуальных tool-наборов и пользовательских лимитов в MVP нет.
 
-Основной режим разработки — локальный Telegram long polling. Его можно запустить напрямую с SQLite либо одной Docker-командой с PostgreSQL. Для контура организации предусмотрен отдельный Compose-стек `web + worker + PostgreSQL` за корпоративным TLS reverse proxy. Секреты не входят в образ и репозиторий.
+## Что реализовано
 
-## Локальный запуск Telegram-бота
+- private Telegram chat и команды `/start`, `/help`, `/new`;
+- администраторы из `ADMIN_TELEGRAM_IDS`;
+- запрос доступа с Telegram-кнопками «Разрешить» и «Отклонить»;
+- отзыв доступа через `/revoke <telegram_id>` без перезапуска;
+- `/login` и `/logout` через Keycloak Device Flow либо Authorization Code + PKCE;
+- зашифрованное хранение персональных access/refresh token в БД и автоматический refresh;
+- передача токена текущего пользователя в `authorization` remote MCP tool;
+- единый read-only allowlist tools для Jira, Bitrix и KTalk;
+- отдельный контекст каждого пользователя, `/new` удаляет его;
+- общий Git-набор skills и версии из БД без перезапуска;
+- `/skills`, `/skill_show`, `/skill_edit`, `/skill_cancel`, `/skill_rollback` для администраторов;
+- агрегированные tokens/cost/latency/error metrics без полного текста диалога;
+- SQLite для прямого локального запуска и PostgreSQL в Docker.
 
-1. Создать бота через `@BotFather` и получить token.
-2. Запустить из PowerShell:
+## Что нужно до первого live MCP-теста
 
-   ```powershell
-   .\scripts\local-up.ps1
-   ```
+Администратор Keycloak должен выдать public `client_id` без secret. Готовый запрос: [docs/keycloak-admin-request.md](docs/keycloak-admin-request.md).
 
-3. Вставить token в скрытый запрос скрипта и написать боту `/start` в личном чате.
+После этого нужны утверждённые read-only tool names. Сейчас в [config/mcp_servers.json](config/mcp_servers.json) заполнен только Jira allowlist; Bitrix и KTalk намеренно отключены пустыми списками до discovery и согласования.
 
-По умолчанию используется бесплатный `mock`: он позволяет проверить Telegram, доступ, очередь и контекст без OpenAI. Первый пользователь, отправивший `/start`, становится локальным владельцем. Чтобы заранее закрепить конкретный Telegram ID:
+## Прямой локальный запуск
+
+Требуются Python 3.11+ и PowerShell. Числовой Telegram ID администратора можно передать параметром; он одновременно включается в пилотный allowlist.
+
+Mock без расходов OpenAI:
 
 ```powershell
 .\scripts\local-up.ps1 -OwnerTelegramUserId 123456789
 ```
 
-Для реального OpenAI после получения project API key:
+OpenAI, модель по умолчанию `gpt-5.6-luna`:
 
 ```powershell
-.\scripts\local-up.ps1 -OpenAI
+.\scripts\local-up.ps1 -OpenAI -OwnerTelegramUserId 123456789
 ```
 
-Для OpenAI вместе с уже полученным OAuth access token Jira MCP:
+После получения Keycloak client ID:
 
 ```powershell
-.\scripts\local-up.ps1 -OpenAI -Mcp
+.\scripts\local-up.ps1 -OpenAI -OwnerTelegramUserId 123456789 -KeycloakClientId 'modus-sales-telegram-bot'
 ```
 
-Скрипт дополнительно запросит токен MCP скрытым вводом. После запуска повторите
-`/start`, чтобы локальный владелец получил актуальный allowlist, затем выполните
-`/mcp jira покажи задачу SH-501`.
-
-По умолчанию используется модель `gpt-5.6-luna`.
-
-Скрипт отдельно и скрыто запросит Telegram token и OpenAI key. Секреты не записываются в репозиторий или SQLite. Остановка — `Ctrl+C`.
-
-### Контекст, skills и MCP
-
-- контекст хранится в локальной `data/sales_bot.db`: до 12 сообщений, 24 000 символов и 24 часов; `/new` очищает его сразу;
-- `config/project/prompt.md` и каждый `config/project/skills/*/SKILL.md` автоматически собираются в инструкции агента при старте;
-- MCP-серверы задаются через `MCP_SERVERS_JSON`; к OpenAI передаются только tools, одновременно разрешённые в конфигурации сервера и для локального владельца;
-- конфигурация с `read_only=false` отклоняется до запуска.
-
-Реестр MCP хранится без секретов в `config/mcp_servers.json`. В нём уже зафиксированы Jira, Bitrix и KTalk; `allowed_tools` остаются пустыми до OAuth-входа и live discovery.
-
-Принятый сценарий персональной OAuth-авторизации через Telegram описан в [docs/telegram-mcp-oauth.md](docs/telegram-mcp-oauth.md).
-
-Для явной smoke-проверки MCP используйте команду:
-
-```text
-/mcp jira покажи задачу SH-501
-/mcp ktalk найди запись встречи
-/mcp bitrix найди сделку по клиенту
-```
-
-Команда ограничивает запрос выбранным MCP-сервером и требует хотя бы один tool call.
-Без параметров `/mcp` показывает серверы, для которых утверждён непустой
-`allowed_tools`. OpenAI API key не переносит OAuth-подключения из Developer Mode:
-локальное приложение должно передавать OAuth access token в каждом Responses API
-запросе через `JIRA_MCP_ACCESS_TOKEN`, `BITRIX_MCP_ACCESS_TOKEN` или
-`KTALK_MCP_ACCESS_TOKEN`.
-
-Пример временного переопределения через environment:
-
-```powershell
-$env:MCP_SERVERS_JSON='[{"server_label":"bitrix","server_description":"Bitrix CRM read-only","server_url":"https://example/mcp","allowed_tools":["get_deal"],"read_only":true}]'
-.\scripts\local-up.ps1 -OpenAI
-```
-
-Если MCP требует OAuth bearer token, в объекте задаётся `"authorization_env":"BITRIX_MCP_ACCESS_TOKEN"`, а значение — только в переменной текущего процесса. Сохранённое OAuth-подключение ChatGPT/developer mode не считается автоматически доступным локальному API-приложению.
-
-## Что реализовано
-
-- HTTPS webhook с проверкой `X-Telegram-Bot-Api-Secret-Token`, private chat и владельца чата;
-- дедупликация `update_id`, очередь в PostgreSQL и ограниченные повторы worker;
-- повторная проверка доступа перед OpenAI/MCP и немедленный отзыв без перезапуска;
-- состояния `pending`, `active`, `revoked`, защищённая web-админка и аудит;
-- `/start`, `/help`, `/new`, только текстовые сообщения;
-- краткоживущий контекст, `store=false`, отсутствие текста диалогов в технических метриках;
-- Responses API, versioned prompt/skills bundle и read-only allowlist для Bitrix/KTalk MCP;
-- токены, latency, модель, результат, обезличенный пользователь, сценарий и расчётная стоимость;
-- метрики в PostgreSQL и обезличенная CSV-выгрузка.
-
-Полное решение, оценки и go/no-go критерии: [docs/technical-solution.md](docs/technical-solution.md).
+Скрипт скрыто запрашивает Telegram token и OpenAI API key. Они действуют только в процессе и не сохраняются. Постоянный локальный `TOKEN_ENCRYPTION_KEY` автоматически создаётся в игнорируемом `data/token-encryption.key`, поэтому OAuth-сессии переживают перезапуск.
 
 ## Локальный запуск в Docker
 
-Требуются Docker Desktop и PowerShell:
-
 ```powershell
-.\scripts\docker-up.ps1
+.\scripts\docker-up.ps1 -OpenAI -OwnerTelegramUserId 123456789
 ```
 
-Скрипт создаёт игнорируемый `.env.docker.local` со случайными локальными секретами, скрыто запрашивает Telegram token, поднимает PostgreSQL и контейнер бота в long polling. Без флага используется бесплатный `mock`.
-
-Реальный OpenAI:
+С Keycloak:
 
 ```powershell
-.\scripts\docker-up.ps1 -OpenAI
+.\scripts\docker-up.ps1 -OpenAI -OwnerTelegramUserId 123456789 -KeycloakClientId 'modus-sales-telegram-bot'
 ```
 
-Запуск с логами в текущем окне:
-
-```powershell
-.\scripts\docker-up.ps1 -OpenAI -Foreground
-```
+Скрипт создаёт игнорируемый `.env.docker.local`, генерирует PostgreSQL password, webhook/safety secrets и постоянный Fernet key, затем поднимает PostgreSQL и polling bot. Telegram/OpenAI secrets сохраняются только в игнорируемом локальном env-файле.
 
 Остановка:
 
 ```powershell
 docker compose --env-file .env.docker.local -f docker-compose.local.yml down
+```
+
+## Команды бота
+
+- `/start` — запросить или проверить доступ;
+- `/help` — показать помощь;
+- `/new` — удалить контекст диалога;
+- `/login` — начать настроенный корпоративный OAuth flow;
+- `/logout` — отозвать и удалить OAuth-токены;
+- `/mcp jira покажи SH-501` — принудительно вызвать выбранный MCP;
+- `/skills` — выбрать skill, только администратор;
+- `/skill_show`, `/skill_edit`, `/skill_cancel`, `/skill_rollback` — управление выбранным skill;
+- `/revoke 123456789` — отозвать доступ пользователя.
+
+Обычный запрос может использовать подключённые MCP автоматически. Ошибка или отсутствие OAuth не блокирует обычный ответ без MCP. Команда `/mcp` требует `/login` и хотя бы один разрешённый tool выбранного сервера.
+
+## Конфигурация
+
+Безопасный шаблон: [.env.example](.env.example). Основные значения:
+
+- `ADMIN_TELEGRAM_IDS` — Telegram ID администраторов через запятую;
+- `PILOT_TELEGRAM_IDS` — заранее разрешённые пользователи;
+- `KEYCLOAK_ISSUER`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_SCOPES`;
+- `KEYCLOAK_RESOURCE=https://mcp.modusbi.ru`;
+- `KEYCLOAK_FLOW=device` локально или `authorization_code` после HTTPS-развёртывания;
+- `TOKEN_ENCRYPTION_KEY` — постоянный Fernet key вне Git и БД;
+- `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`;
+- `MCP_SERVERS_FILE=config/mcp_servers.json`.
+
+Все три MCP получают персональный Keycloak token текущего Telegram-пользователя. Статические MCP-токены из environment больше не используются.
+
+Для `authorization_code` Keycloak должен разрешать точный redirect URI
+`<PUBLIC_BASE_URL>/oauth/callback` и требовать PKCE `S256`. Бот генерирует собственные
+`state`, verifier/challenge, не принимает `id_token_hint` извне и делает OAuth state
+одноразовым.
+
+После заполнения env DevOps может проверить публичные OAuth metadata без вывода
+секретов:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\check_keycloak_config.py
 ```
 
 ## Проверка
@@ -124,29 +115,6 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 .\scripts\verify.ps1
 ```
 
-Команда создаёт `.venv`, устанавливает зависимости, запускает Ruff, тесты критических сценариев и локальный HTTP readiness smoke-test.
+Проверка устанавливает зависимости, запускает Ruff, тесты критических сценариев, secret scan и HTTP readiness smoke.
 
-## Подключение реальных сервисов
-
-1. На сервере создать закрытый env-файл на основе `.env.example`, заполнить PostgreSQL и секреты и установить `APP_ENV=production`. Сам файл не коммитить.
-2. Установить `AGENT_BACKEND=openai`, API key, точную модель и актуальные цены модели.
-3. Либо указать опубликованные `OPENAI_PROMPT_ID`/`OPENAI_PROMPT_VERSION`, либо импортировать versioned bundle:
-
-   ```powershell
-   .\.venv\Scripts\python.exe .\scripts\import_project_bundle.py --prompt C:\secure\sales-agent\prompt.md --skills-dir C:\secure\sales-agent\skills
-   ```
-
-4. После реализации персонального Device Flow выполнить discovery Jira/Bitrix/KTalk MCP под тестовым пользователем, вручную утвердить read-only tool names и заполнить `config/mcp_servers.json`. Write tools кодом запрещены через `read_only=true` и двойной allowlist.
-5. Развернуть сервис за корпоративным TLS reverse proxy. Зарегистрировать webhook:
-
-   ```powershell
-   $env:TELEGRAM_BOT_TOKEN='...'
-   $env:TELEGRAM_WEBHOOK_SECRET='...'
-   .\.venv\Scripts\python.exe .\scripts\register_webhook.py --url https://sales-bot.example.ru
-   ```
-
-6. Проверить метрики в PostgreSQL и обезличенную CSV-выгрузку; текст запросов в метрики не попадает.
-
-Секреты не должны храниться в Git, Jira, логах или передаваемом файле с вводными.
-
-Полный runbook, сетевые требования и критерии приёмки: [docs/deployment.md](docs/deployment.md).
+Для production-развёртывания используйте [инструкцию DevOps](docs/devops-keycloak-deployment-runbook.md) и [общий deployment runbook](docs/deployment.md). Секреты запрещено хранить в Git, Jira и логах.

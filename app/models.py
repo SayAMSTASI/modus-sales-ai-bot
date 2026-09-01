@@ -5,11 +5,13 @@ from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Float,
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -128,3 +130,75 @@ class AdminAudit(Base):
     target_telegram_user_id: Mapped[int] = mapped_column(BigInteger)
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
 
+
+class OAuthCredential(Base):
+    __tablename__ = "oauth_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    access_token_encrypted: Mapped[str] = mapped_column(Text)
+    refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_type: Mapped[str] = mapped_column(String(32), default="Bearer")
+    scope: Mapped[str] = mapped_column(Text, default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    refresh_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class OAuthDeviceSession(Base):
+    __tablename__ = "oauth_device_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    device_code_encrypted: Mapped[str] = mapped_column(Text)
+    user_code: Mapped[str] = mapped_column(String(255))
+    verification_uri: Mapped[str] = mapped_column(Text)
+    verification_uri_complete: Mapped[str | None] = mapped_column(Text, nullable=True)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=5)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    next_poll_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class OAuthAuthorizationSession(Base):
+    __tablename__ = "oauth_authorization_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    code_verifier_encrypted: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SkillVersion(Base):
+    __tablename__ = "skill_versions"
+    __table_args__ = (UniqueConstraint("skill_name", "version", name="uq_skill_version"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    skill_name: Mapped[str] = mapped_column(String(128), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by_telegram_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SkillEditSession(Base):
+    __tablename__ = "skill_edit_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    admin_telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    skill_name: Mapped[str] = mapped_column(String(128))
+    state: Mapped[str] = mapped_column(String(32), default="selected")
+    draft_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )

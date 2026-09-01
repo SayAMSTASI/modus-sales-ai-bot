@@ -1,5 +1,7 @@
 # Развёртывание Modus Sales Bot в контуре организации
 
+Пошаговая инструкция для исполнителя: [devops-keycloak-deployment-runbook.md](devops-keycloak-deployment-runbook.md).
+
 ## Целевой результат
 
 Внутри корпоративного контура работают PostgreSQL, webhook/API и один worker. Внешний TLS reverse proxy принимает Telegram webhook. Секреты передаются отдельно через корпоративное хранилище секретов или закрытый env-файл на сервере и никогда не попадают в Git, Jira, образ или логи.
@@ -15,7 +17,7 @@
 - исходящий HTTPS к `api.telegram.org`, `api.openai.com`, `auth.modusbi.ru` и `mcp.modusbi.ru`;
 - PostgreSQL 17 с ежедневным backup и проверяемым восстановлением;
 - отдельный OpenAI Project API key с бюджетным ограничением;
-- public OAuth client Keycloak с Device Authorization Grant.
+- public OAuth client Keycloak с Authorization Code + PKCE и Device Flow для локальной проверки.
 
 ## Передача конфигурации
 
@@ -25,11 +27,14 @@
 - `POSTGRES_PASSWORD` и совпадающий `DATABASE_URL` с host `db`;
 - `PUBLIC_BASE_URL`;
 - `TELEGRAM_BOT_TOKEN` и случайный `TELEGRAM_WEBHOOK_SECRET`;
-- `ADMIN_PASSWORD` и `SAFETY_IDENTIFIER_SECRET`;
+- `ADMIN_TELEGRAM_IDS`, `PILOT_TELEGRAM_IDS` и `SAFETY_IDENTIFIER_SECRET`;
 - `AGENT_BACKEND=openai`, `OPENAI_API_KEY`, утверждённая модель и актуальные тарифы;
-- `MODUSBI_MCP_OAUTH_CLIENT_ID` после выполнения SH-519.
+- `KEYCLOAK_ISSUER`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_SCOPES`;
+- `KEYCLOAK_RESOURCE=https://mcp.modusbi.ru`;
+- `KEYCLOAK_FLOW=authorization_code`;
+- постоянный `TOKEN_ENCRYPTION_KEY` в защищённой переменной окружения.
 
-Access/refresh tokens пользователей нельзя хранить в env-файле. До промышленного запуска необходимо реализовать персональный Device Flow и зашифрованное хранение токенов в PostgreSQL.
+Access/refresh tokens пользователей хранятся только в PostgreSQL в зашифрованном виде. Fernet key нельзя хранить в БД: при его потере сохранённые OAuth-сессии невозможно расшифровать, при компрометации ключ нужно заменить и потребовать повторный `/login`.
 
 ## Запуск
 
@@ -41,7 +46,7 @@ docker compose --env-file "$ENV_FILE" ps
 curl --fail http://127.0.0.1:8000/health/ready
 ```
 
-Reverse proxy направляет `https://<domain>/telegram/webhook` на `http://127.0.0.1:8000/telegram/webhook`. Порт 8000 не публикуется наружу напрямую.
+Reverse proxy направляет `https://<domain>/telegram/webhook` и `https://<domain>/oauth/callback` на web-контейнер. Значение `PUBLIC_BASE_URL` должно быть ровно `https://<domain>`, а Keycloak Valid Redirect URI — ровно `https://<domain>/oauth/callback`. Порт 8000 не публикуется наружу напрямую.
 
 После запуска зарегистрировать webhook командой `scripts/register_webhook.py`, передав token и webhook secret только через защищённую сессию сервера.
 
@@ -49,8 +54,8 @@ Reverse proxy направляет `https://<domain>/telegram/webhook` на `htt
 
 1. Healthcheck web, worker и PostgreSQL зелёные после перезапуска host.
 2. Telegram принимает `/start` только в private chat; повторный `update_id` не создаёт второй ответ.
-3. Пользователь проходит `/connect jira|bitrix|ktalk` на `auth.modusbi.ru`; бот не принимает пароль или OTP.
-4. Access/refresh tokens зашифрованы в PostgreSQL, обновляются и удаляются при `/disconnect` или revoke.
+3. Пользователь проходит `/login` на `auth.modusbi.ru`; бот не принимает пароль или OTP.
+4. Access/refresh tokens зашифрованы в PostgreSQL, обновляются и удаляются при `/logout` или revoke.
 5. Утверждён read-only allowlist для каждого MCP; write tools недоступны.
 6. KTalk-ссылка возвращает реальный протокол, Jira — реальную задачу, Bitrix — разрешённые пользователю данные.
 7. OpenAI request использует `store=false`; секреты и текст диалога отсутствуют в технических логах.

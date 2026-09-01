@@ -1,7 +1,7 @@
 param(
     [switch]$OpenAI,
-    [switch]$Mcp,
-    [Nullable[long]]$OwnerTelegramUserId
+    [Nullable[long]]$OwnerTelegramUserId,
+    [string]$KeycloakClientId = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,9 +37,52 @@ if (-not $env:TELEGRAM_BOT_TOKEN) {
 
 $env:APP_ENV = 'development'
 $env:DATABASE_URL = 'sqlite:///./data/sales_bot.db'
-$env:LOCAL_AUTO_APPROVE_FIRST_USER = 'true'
+$env:LOCAL_AUTO_APPROVE_FIRST_USER = 'false'
+$dataDirectory = Join-Path $projectRoot 'data'
+New-Item -ItemType Directory -Force -Path $dataDirectory | Out-Null
+$adminIdPath = Join-Path $dataDirectory 'admin-telegram-ids.txt'
 if ($null -ne $OwnerTelegramUserId) {
-    $env:LOCAL_OWNER_TELEGRAM_USER_ID = $OwnerTelegramUserId.Value.ToString()
+    $ownerId = $OwnerTelegramUserId.Value.ToString()
+    $env:ADMIN_TELEGRAM_IDS = $ownerId
+    $env:PILOT_TELEGRAM_IDS = $ownerId
+    Set-Content -LiteralPath $adminIdPath -Value $ownerId -Encoding ascii
+}
+elseif (-not $env:ADMIN_TELEGRAM_IDS -and (Test-Path -LiteralPath $adminIdPath)) {
+    $ownerId = (Get-Content -Raw -LiteralPath $adminIdPath).Trim()
+    $env:ADMIN_TELEGRAM_IDS = $ownerId
+    $env:PILOT_TELEGRAM_IDS = $ownerId
+}
+elseif (-not $env:ADMIN_TELEGRAM_IDS) {
+    $ownerId = Read-Host 'Your numeric Telegram user ID (pilot administrator)'
+    if ($ownerId -notmatch '^\d+$') {
+        throw 'Telegram user ID must contain digits only.'
+    }
+    $env:ADMIN_TELEGRAM_IDS = $ownerId
+    $env:PILOT_TELEGRAM_IDS = $ownerId
+    Set-Content -LiteralPath $adminIdPath -Value $ownerId -Encoding ascii
+}
+if (-not $env:TOKEN_ENCRYPTION_KEY) {
+    $keyPath = Join-Path $projectRoot 'data\token-encryption.key'
+    if (Test-Path -LiteralPath $keyPath) {
+        $env:TOKEN_ENCRYPTION_KEY = (Get-Content -Raw -LiteralPath $keyPath).Trim()
+    }
+    else {
+        $keyDirectory = Split-Path -Parent $keyPath
+        New-Item -ItemType Directory -Force -Path $keyDirectory | Out-Null
+        $env:TOKEN_ENCRYPTION_KEY = & $python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+        Set-Content -LiteralPath $keyPath -Value $env:TOKEN_ENCRYPTION_KEY -Encoding ascii
+        Write-Host 'Created ignored local OAuth encryption key: data\token-encryption.key'
+    }
+}
+if ($KeycloakClientId) {
+    $env:KEYCLOAK_CLIENT_ID = $KeycloakClientId
+    Set-Content -LiteralPath (Join-Path $dataDirectory 'keycloak-client-id.txt') -Value $KeycloakClientId -Encoding ascii
+}
+elseif (-not $env:KEYCLOAK_CLIENT_ID) {
+    $clientIdPath = Join-Path $dataDirectory 'keycloak-client-id.txt'
+    if (Test-Path -LiteralPath $clientIdPath) {
+        $env:KEYCLOAK_CLIENT_ID = (Get-Content -Raw -LiteralPath $clientIdPath).Trim()
+    }
 }
 
 if ($OpenAI) {
@@ -56,37 +99,6 @@ else {
     Write-Host 'OpenAI is disabled: deterministic mock responses will be used.'
 }
 
-$temporaryMcpTokenNames = @()
-if ($Mcp) {
-    if (-not $OpenAI) {
-        throw 'MCP requires -OpenAI because remote MCP tools are called through Responses API.'
-    }
-    $registryPath = Join-Path $projectRoot 'config\mcp_servers.json'
-    $enabledServers = @(
-        Get-Content -LiteralPath $registryPath -Raw |
-            ConvertFrom-Json |
-            Where-Object { @($_.allowed_tools).Count -gt 0 }
-    )
-    if ($enabledServers.Count -eq 0) {
-        throw 'No MCP servers have an approved allowed_tools list.'
-    }
-    foreach ($server in $enabledServers) {
-        $tokenName = [string]$server.authorization_env
-        if (-not $tokenName) {
-            continue
-        }
-        $token = [Environment]::GetEnvironmentVariable($tokenName, 'Process')
-        if (-not $token) {
-            $token = Read-Secret "OAuth access token for MCP $($server.server_label)"
-            if (-not $token) {
-                throw "OAuth access token for MCP $($server.server_label) is empty."
-            }
-            [Environment]::SetEnvironmentVariable($tokenName, $token, 'Process')
-            $temporaryMcpTokenNames += $tokenName
-        }
-    }
-}
-
 Push-Location $projectRoot
 try {
     & $python -m app.local_bot
@@ -94,8 +106,6 @@ try {
 finally {
     $env:TELEGRAM_BOT_TOKEN = $null
     $env:OPENAI_API_KEY = $null
-    foreach ($tokenName in $temporaryMcpTokenNames) {
-        [Environment]::SetEnvironmentVariable($tokenName, $null, 'Process')
-    }
+    $env:TOKEN_ENCRYPTION_KEY = $null
     Pop-Location
 }

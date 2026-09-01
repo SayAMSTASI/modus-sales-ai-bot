@@ -40,12 +40,21 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = "dev-webhook-secret"
     telegram_poll_timeout_seconds: int = 20
     telegram_drop_pending_updates: bool = False
-    local_auto_approve_first_user: bool = True
+    local_auto_approve_first_user: bool = False
     local_owner_telegram_user_id: int | None = None
-    admin_username: str = "access_admin"
-    admin_password: str = "dev-admin-password"
+    admin_telegram_ids: str = ""
+    pilot_telegram_ids: str = ""
     safety_identifier_secret: str = "dev-safety-secret"
     openai_api_key: str = ""
+
+    keycloak_issuer: str = "https://auth.modusbi.ru/realms/master"
+    keycloak_client_id: str = ""
+    keycloak_scopes: str = "openid profile email offline_access"
+    keycloak_resource: str = "https://mcp.modusbi.ru"
+    keycloak_flow: Literal["device", "authorization_code"] = "device"
+    token_encryption_key: str = ""
+    oauth_http_timeout_seconds: float = 15.0
+    oauth_authorization_ttl_seconds: int = 600
 
     agent_backend: Literal["mock", "openai"] = "mock"
     openai_model: str = "gpt-5.6-luna"
@@ -85,9 +94,10 @@ class Settings(BaseSettings):
         values = {
             "TELEGRAM_BOT_TOKEN": self.telegram_bot_token,
             "TELEGRAM_WEBHOOK_SECRET": self.telegram_webhook_secret,
-            "ADMIN_PASSWORD": self.admin_password,
             "SAFETY_IDENTIFIER_SECRET": self.safety_identifier_secret,
             "OPENAI_API_KEY": self.openai_api_key if self.agent_backend == "openai" else "mock",
+            "KEYCLOAK_CLIENT_ID": self.keycloak_client_id,
+            "TOKEN_ENCRYPTION_KEY": self.token_encryption_key,
         }
         weak = [
             name
@@ -96,7 +106,51 @@ class Settings(BaseSettings):
         ]
         if weak:
             raise ValueError(f"Production secrets are missing or weak: {', '.join(weak)}")
+        if not self.admin_ids():
+            raise ValueError("Production ADMIN_TELEGRAM_IDS is empty")
+        if self.keycloak_flow == "authorization_code" and not self.public_base_url.startswith(
+            "https://"
+        ):
+            raise ValueError("Authorization Code Flow requires an HTTPS PUBLIC_BASE_URL")
         return self
+
+    @staticmethod
+    def _parse_id_list(value: str) -> set[int]:
+        result: set[int] = set()
+        for item in value.split(","):
+            item = item.strip()
+            if item:
+                result.add(int(item))
+        return result
+
+    def admin_ids(self) -> set[int]:
+        return self._parse_id_list(self.admin_telegram_ids)
+
+    def pilot_ids(self) -> set[int]:
+        result = self._parse_id_list(self.pilot_telegram_ids)
+        if self.local_owner_telegram_user_id is not None:
+            result.add(self.local_owner_telegram_user_id)
+        return result
+
+    @property
+    def oauth_authorization_endpoint(self) -> str:
+        return f"{self.keycloak_issuer.rstrip('/')}/protocol/openid-connect/auth"
+
+    @property
+    def oauth_device_authorization_endpoint(self) -> str:
+        return f"{self.keycloak_issuer.rstrip('/')}/protocol/openid-connect/auth/device"
+
+    @property
+    def oauth_token_endpoint(self) -> str:
+        return f"{self.keycloak_issuer.rstrip('/')}/protocol/openid-connect/token"
+
+    @property
+    def oauth_revocation_endpoint(self) -> str:
+        return f"{self.keycloak_issuer.rstrip('/')}/protocol/openid-connect/revoke"
+
+    @property
+    def oauth_redirect_uri(self) -> str:
+        return f"{self.public_base_url.rstrip('/')}/oauth/callback"
 
     def mcp_servers(self) -> list[McpServerConfig]:
         if self.mcp_servers_json.strip():

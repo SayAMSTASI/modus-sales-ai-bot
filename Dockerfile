@@ -7,6 +7,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY config ./config
+COPY scripts/check_keycloak_config.py scripts/register_webhook.py ./scripts/
 RUN pip install --no-cache-dir .
 
 RUN addgroup --system app && adduser --system --ingroup app app \

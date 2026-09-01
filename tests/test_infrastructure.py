@@ -34,3 +34,14 @@ def test_secret_files_and_local_data_are_gitignored():
     assert ".env.*" in gitignore
     assert "data/" in gitignore
     assert "secrets/" in gitignore
+
+
+def test_production_image_contains_operational_scripts():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "scripts/check_keycloak_config.py" in dockerfile
+    assert "scripts/register_webhook.py" in dockerfile
+
+
+def test_webhook_registration_includes_admin_callbacks():
+    script = (ROOT / "scripts" / "register_webhook.py").read_text(encoding="utf-8")
+    assert '"allowed_updates": ["message", "callback_query"]' in script

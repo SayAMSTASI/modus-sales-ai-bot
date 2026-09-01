@@ -1,7 +1,8 @@
 param(
     [switch]$OpenAI,
     [switch]$Foreground,
-    [Nullable[long]]$OwnerTelegramUserId
+    [Nullable[long]]$OwnerTelegramUserId,
+    [string]$KeycloakClientId = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +23,11 @@ function Read-Secret([string]$Prompt) {
 
 function Set-EnvValue([string]$Content, [string]$Name, [string]$Value) {
     $escaped = $Value.Replace('$', '$$')
-    return $Content -replace "(?m)^$([regex]::Escape($Name))=.*$", "$Name=$escaped"
+    $pattern = "(?m)^$([regex]::Escape($Name))=.*$"
+    if ($Content -match $pattern) {
+        return $Content -replace $pattern, "$Name=$escaped"
+    }
+    return $Content.TrimEnd() + "`r`n$Name=$escaped`r`n"
 }
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -37,14 +42,23 @@ if (-not (Test-Path -LiteralPath $envFile)) {
     $content = Set-EnvValue $content 'POSTGRES_PASSWORD' $postgresPassword
     $content = Set-EnvValue $content 'DATABASE_URL' "postgresql+psycopg://sales_bot:${postgresPassword}@db:5432/sales_bot"
     $content = Set-EnvValue $content 'TELEGRAM_WEBHOOK_SECRET' ([guid]::NewGuid().ToString('N'))
-    $content = Set-EnvValue $content 'ADMIN_PASSWORD' ([guid]::NewGuid().ToString('N'))
     $content = Set-EnvValue $content 'SAFETY_IDENTIFIER_SECRET' ([guid]::NewGuid().ToString('N'))
-    $content = Set-EnvValue $content 'LOCAL_AUTO_APPROVE_FIRST_USER' 'true'
+    $tokenBytes = [byte[]]::new(32)
+    [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
+    $tokenKey = [Convert]::ToBase64String($tokenBytes).Replace('+', '-').Replace('/', '_')
+    $content = Set-EnvValue $content 'TOKEN_ENCRYPTION_KEY' $tokenKey
+    $content = Set-EnvValue $content 'LOCAL_AUTO_APPROVE_FIRST_USER' 'false'
     Set-Content -LiteralPath $envFile -Value $content -Encoding utf8NoBOM
     Write-Host 'Created ignored local configuration: .env.docker.local'
 }
 
 $content = Get-Content -Raw -Encoding utf8 -LiteralPath $envFile
+if ($content -notmatch '(?m)^TOKEN_ENCRYPTION_KEY=.+$') {
+    $tokenBytes = [byte[]]::new(32)
+    [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
+    $tokenKey = [Convert]::ToBase64String($tokenBytes).Replace('+', '-').Replace('/', '_')
+    $content = Set-EnvValue $content 'TOKEN_ENCRYPTION_KEY' $tokenKey
+}
 $telegramToken = Read-Secret 'Telegram bot token from @BotFather'
 if (-not $telegramToken) {
     throw 'Telegram bot token is empty.'
@@ -52,7 +66,21 @@ if (-not $telegramToken) {
 $content = Set-EnvValue $content 'TELEGRAM_BOT_TOKEN' $telegramToken
 
 if ($null -ne $OwnerTelegramUserId) {
-    $content = Set-EnvValue $content 'LOCAL_OWNER_TELEGRAM_USER_ID' $OwnerTelegramUserId.Value.ToString()
+    $ownerId = $OwnerTelegramUserId.Value.ToString()
+    $content = Set-EnvValue $content 'ADMIN_TELEGRAM_IDS' $ownerId
+    $content = Set-EnvValue $content 'PILOT_TELEGRAM_IDS' $ownerId
+}
+elseif ($content -notmatch '(?m)^ADMIN_TELEGRAM_IDS=\s*\d') {
+    $ownerId = Read-Host 'Your numeric Telegram user ID (pilot administrator)'
+    if ($ownerId -notmatch '^\d+$') {
+        throw 'Telegram user ID must contain digits only.'
+    }
+    $content = Set-EnvValue $content 'ADMIN_TELEGRAM_IDS' $ownerId
+    $content = Set-EnvValue $content 'PILOT_TELEGRAM_IDS' $ownerId
+}
+
+if ($KeycloakClientId) {
+    $content = Set-EnvValue $content 'KEYCLOAK_CLIENT_ID' $KeycloakClientId
 }
 
 if ($OpenAI) {

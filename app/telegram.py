@@ -12,7 +12,14 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramClient(Protocol):
-    def send_message(self, chat_id: int, text: str) -> None: ...
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> None: ...
 
 
 class PollingTelegramClient(TelegramClient, Protocol):
@@ -43,8 +50,22 @@ class HttpTelegramClient:
             raise RuntimeError(f"Telegram API {method} failed: {description}")
         return body.get("result")
 
-    def send_message(self, chat_id: int, text: str) -> None:
-        self._post("sendMessage", {"chat_id": chat_id, "text": text[:4096]})
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text[:4096]}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        self._post("sendMessage", payload)
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
+        self._post(
+            "answerCallbackQuery",
+            {"callback_query_id": callback_query_id, "text": text[:200]},
+        )
 
     def get_me(self) -> dict[str, Any]:
         result = self._post("getMe", {})
@@ -58,7 +79,7 @@ class HttpTelegramClient:
     def get_updates(self, *, offset: int | None, timeout: int) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
             "timeout": timeout,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],
         }
         if offset is not None:
             payload["offset"] = offset
@@ -69,16 +90,35 @@ class HttpTelegramClient:
 
 
 class LoggingTelegramClient:
-    def send_message(self, chat_id: int, text: str) -> None:
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
         logger.info("Mock Telegram delivery chat_id=%s chars=%s", chat_id, len(text))
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
+        logger.info("Mock callback answer callback_query_id=%s", callback_query_id)
 
 
 @dataclass
 class InMemoryTelegramClient:
     messages: list[tuple[int, str]] = field(default_factory=list)
+    markups: list[dict[str, Any] | None] = field(default_factory=list)
+    callback_answers: list[tuple[str, str]] = field(default_factory=list)
 
-    def send_message(self, chat_id: int, text: str) -> None:
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
         self.messages.append((chat_id, text))
+        self.markups.append(reply_markup)
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
+        self.callback_answers.append((callback_query_id, text))
 
 
 def build_telegram_client(settings: Settings) -> TelegramClient:

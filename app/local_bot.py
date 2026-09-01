@@ -57,7 +57,6 @@ class LocalBotRuntime:
                 self.settings,
                 self.factory,
                 update,
-                auto_approve_local_owner=True,
             )
             if not result.get("accepted"):
                 logger.info(
@@ -66,6 +65,10 @@ class LocalBotRuntime:
                     result.get("reason"),
                 )
         processed = 0
+        while self.processor.run_once():
+            processed += 1
+        while self.processor.poll_oauth_once():
+            processed += 1
         while self.processor.run_once():
             processed += 1
         return processed
