@@ -5,6 +5,8 @@ import os
 
 import httpx
 
+from app.telegram import BOT_COMMANDS
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Register the Telegram HTTPS webhook")
@@ -28,7 +30,19 @@ def main() -> None:
     payload = response.json()
     if not payload.get("ok"):
         raise SystemExit(f"Telegram rejected webhook registration: {payload.get('description')}")
-    print("Webhook registered")
+    commands_response = httpx.post(
+        f"https://api.telegram.org/bot{token}/setMyCommands",
+        json={"commands": BOT_COMMANDS},
+        timeout=20,
+    )
+    commands_response.raise_for_status()
+    commands_payload = commands_response.json()
+    if not commands_payload.get("ok"):
+        raise SystemExit(
+            "Telegram rejected command menu: "
+            f"{commands_payload.get('description')}"
+        )
+    print("Webhook and command menu registered")
 
 
 if __name__ == "__main__":

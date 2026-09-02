@@ -10,6 +10,16 @@ from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
+BOT_COMMANDS = [
+    {"command": "start", "description": "Открыть главное меню"},
+    {"command": "menu", "description": "Показать кнопки управления"},
+    {"command": "help", "description": "Что умеет бот и примеры"},
+    {"command": "new", "description": "Начать новый диалог"},
+    {"command": "login", "description": "Войти через Keycloak"},
+    {"command": "logout", "description": "Выйти из корпоративных систем"},
+    {"command": "mcp_status", "description": "Проверить Jira, Bitrix и KTalk"},
+]
+
 
 class TelegramClient(Protocol):
     def send_message(
@@ -20,6 +30,8 @@ class TelegramClient(Protocol):
     ) -> None: ...
 
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> None: ...
+
+    def set_commands(self, commands: list[dict[str, str]]) -> None: ...
 
 
 class PollingTelegramClient(TelegramClient, Protocol):
@@ -67,6 +79,9 @@ class HttpTelegramClient:
             {"callback_query_id": callback_query_id, "text": text[:200]},
         )
 
+    def set_commands(self, commands: list[dict[str, str]]) -> None:
+        self._post("setMyCommands", {"commands": commands})
+
     def get_me(self) -> dict[str, Any]:
         result = self._post("getMe", {})
         if not isinstance(result, dict):
@@ -101,12 +116,16 @@ class LoggingTelegramClient:
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
         logger.info("Mock callback answer callback_query_id=%s", callback_query_id)
 
+    def set_commands(self, commands: list[dict[str, str]]) -> None:
+        logger.info("Mock Telegram commands configured count=%s", len(commands))
+
 
 @dataclass
 class InMemoryTelegramClient:
     messages: list[tuple[int, str]] = field(default_factory=list)
     markups: list[dict[str, Any] | None] = field(default_factory=list)
     callback_answers: list[tuple[str, str]] = field(default_factory=list)
+    commands: list[dict[str, str]] = field(default_factory=list)
 
     def send_message(
         self,
@@ -119,6 +138,9 @@ class InMemoryTelegramClient:
 
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
         self.callback_answers.append((callback_query_id, text))
+
+    def set_commands(self, commands: list[dict[str, str]]) -> None:
+        self.commands = commands
 
 
 def build_telegram_client(settings: Settings) -> TelegramClient:

@@ -95,6 +95,94 @@ def mcp_capability_note(settings: Settings, *, authorized: bool) -> str:
     return "\n".join(lines)
 
 
+def is_admin(session: Session, settings: Settings, telegram_user_id: int) -> bool:
+    if telegram_user_id in settings.admin_ids():
+        return True
+    return bool(
+        session.scalar(
+            select(UserAccess.id).where(
+                UserAccess.telegram_user_id == telegram_user_id,
+                UserAccess.role == "admin",
+                UserAccess.status == AccessStatus.active,
+            )
+        )
+    )
+
+
+def active_admin_ids(session: Session, settings: Settings) -> set[int]:
+    result = set(settings.admin_ids())
+    result.update(
+        session.scalars(
+            select(UserAccess.telegram_user_id).where(
+                UserAccess.role == "admin",
+                UserAccess.status == AccessStatus.active,
+            )
+        )
+    )
+    return result
+
+
+def main_menu_markup(*, admin: bool) -> dict[str, Any]:
+    keyboard = [
+        [
+            {"text": "🆕 Новый диалог"},
+            {"text": "🔐 Авторизация"},
+        ],
+        [
+            {"text": "🧩 Инструменты"},
+            {"text": "ℹ️ Возможности"},
+        ],
+    ]
+    if admin:
+        keyboard.extend(
+            [
+                [
+                    {"text": "⚙️ Управление"},
+                    {"text": "🔎 MCP статус"},
+                ],
+                [
+                    {"text": "👥 Администраторы"},
+                    {"text": "🛠 Навыки"},
+                ],
+            ]
+        )
+    return {
+        "keyboard": keyboard,
+        "resize_keyboard": True,
+        "is_persistent": True,
+        "input_field_placeholder": "Напишите задачу агенту…",
+    }
+
+
+def help_text(*, admin: bool) -> str:
+    text = (
+        "Что умеет Sales AI\n\n"
+        "• Общается в обычном диалоге и помнит контекст.\n"
+        "• Применяет общий набор sales skills.\n"
+        "• Читает задачи Jira, данные CRM Bitrix и записи KTalk через MCP.\n"
+        "• Работает только с вашими корпоративными правами после /login.\n\n"
+        "Как пользоваться\n"
+        "1. Нажмите «🔐 Авторизация» и выполните /login.\n"
+        "2. Просто опишите задачу обычным текстом.\n"
+        "3. Для нового контекста нажмите «🆕 Новый диалог».\n\n"
+        "Примеры\n"
+        "• Покажи задачу SH-501 и кратко перескажи статус.\n"
+        "• Найди последние сделки компании в Bitrix.\n"
+        "• Сделай протокол последней встречи KTalk."
+    )
+    if admin:
+        text += (
+            "\n\nАдминистратору\n"
+            "• «⚙️ Управление» — команды управления.\n"
+            "• «👥 Администраторы» — список администраторов.\n"
+            "• «🛠 Навыки» — просмотр и изменение skills.\n"
+            "• /admin_add <Telegram ID> — добавить администратора.\n"
+            "• /admin_remove <Telegram ID> — убрать добавленного администратора.\n"
+            "• /revoke <Telegram ID> — отозвать доступ пользователя."
+        )
+    return text
+
+
 class JobProcessor:
     def __init__(
         self,
@@ -246,7 +334,7 @@ class JobProcessor:
             return version.content, f"версия {version.version} из БД"
         return base_skill_content(self.settings.project_dir, skill_name), "базовая версия из Git"
 
-    def _notify_access_request(self, user: UserAccess) -> None:
+    def _notify_access_request(self, session: Session, user: UserAccess) -> None:
         username = f"@{user.telegram_username}" if user.telegram_username else "без username"
         markup = {
             "inline_keyboard": [
@@ -262,7 +350,7 @@ class JobProcessor:
                 ]
             ]
         }
-        for admin_id in sorted(self.settings.admin_ids()):
+        for admin_id in sorted(active_admin_ids(session, self.settings)):
             try:
                 self.telegram.send_message(
                     admin_id,
@@ -395,7 +483,7 @@ class JobProcessor:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             self._finish(session, job)
             return
-        if job.telegram_user_id not in self.settings.admin_ids():
+        if not is_admin(session, self.settings, job.telegram_user_id):
             self.telegram.answer_callback_query(callback_id, "Недостаточно прав")
             self._send_and_finish(session, job, "Команда доступна только администратору.")
             return
@@ -417,7 +505,7 @@ class JobProcessor:
         self._send_and_finish(session, job, text)
 
     def _process_skill_command(self, session: Session, job: UpdateJob) -> None:
-        if job.telegram_user_id not in self.settings.admin_ids():
+        if not is_admin(session, self.settings, job.telegram_user_id):
             self._send_and_finish(session, job, "Команда доступна только администратору.")
             return
         if job.kind == "skills":
@@ -483,8 +571,173 @@ class JobProcessor:
                 f"Skill {skill_name} возвращён к: {source}.",
             )
 
+    def _process_admin_command(self, session: Session, job: UpdateJob) -> None:
+        if not is_admin(session, self.settings, job.telegram_user_id):
+            self._send_and_finish(session, job, "Команда доступна только администратору.")
+            return
+
+        if job.kind == "admin":
+            self._send_and_finish(
+                session,
+                job,
+                "Управление ботом\n\n"
+                "• 👥 Администраторы — посмотреть текущих администраторов.\n"
+                "• 🛠 Навыки — выбрать и изменить skill.\n"
+                "• 🔎 MCP статус — проверить корпоративные интеграции.\n\n"
+                "Команды с параметром:\n"
+                "/admin_add <Telegram ID> — добавить администратора;\n"
+                "/admin_remove <Telegram ID> — убрать добавленного администратора;\n"
+                "/revoke <Telegram ID> — отозвать доступ пользователя.",
+                main_menu_markup(admin=True),
+            )
+            return
+
+        if job.kind == "admins":
+            rows: list[str] = []
+            for admin_id in sorted(active_admin_ids(session, self.settings)):
+                user = session.scalar(
+                    select(UserAccess).where(UserAccess.telegram_user_id == admin_id)
+                )
+                username = (
+                    f"@{user.telegram_username}"
+                    if user is not None and user.telegram_username
+                    else "без username"
+                )
+                source = (
+                    "конфигурация сервера"
+                    if admin_id in self.settings.admin_ids()
+                    else "добавлен через Telegram"
+                )
+                rows.append(f"• {admin_id} — {username} — {source}")
+            self._send_and_finish(
+                session,
+                job,
+                "Администраторы\n\n"
+                + "\n".join(rows)
+                + "\n\nДобавить: /admin_add <Telegram ID>\n"
+                "Убрать: /admin_remove <Telegram ID>",
+                main_menu_markup(admin=True),
+            )
+            return
+
+        raw_target = (job.payload_text or "").strip()
+        try:
+            target_id = int(raw_target)
+            if target_id <= 0:
+                raise ValueError
+        except ValueError:
+            self._send_and_finish(
+                session,
+                job,
+                f"Формат: /{job.kind} <числовой Telegram ID>.",
+                main_menu_markup(admin=True),
+            )
+            return
+
+        target = session.scalar(
+            select(UserAccess).where(UserAccess.telegram_user_id == target_id)
+        )
+        if job.kind == "admin_add":
+            if target_id in active_admin_ids(session, self.settings):
+                self._send_and_finish(
+                    session,
+                    job,
+                    f"Пользователь {target_id} уже администратор.",
+                    main_menu_markup(admin=True),
+                )
+                return
+            target_existed = target is not None
+            if target is None:
+                target = UserAccess(
+                    telegram_user_id=target_id,
+                    chat_id=target_id,
+                    status=AccessStatus.active,
+                    role="admin",
+                    allowed_tools_json=json.dumps(shared_allowed_tools(self.settings)),
+                    request_number=(
+                        f"A-{datetime.now(UTC):%Y%m%d}-{str(target_id)[-6:]}-{job.id}"
+                    ),
+                    approved_by=str(job.telegram_user_id),
+                    approved_at=datetime.now(UTC),
+                )
+                session.add(target)
+            else:
+                target.status = AccessStatus.active
+                target.role = "admin"
+                target.allowed_tools_json = json.dumps(shared_allowed_tools(self.settings))
+                target.approved_by = str(job.telegram_user_id)
+                target.approved_at = datetime.now(UTC)
+            self._audit(
+                session,
+                admin_id=job.telegram_user_id,
+                action="admin_add",
+                target_id=target_id,
+            )
+            if target_existed:
+                self._notice(
+                    session,
+                    target_id,
+                    target.chat_id,
+                    "Вам выданы права администратора Sales AI Bot.",
+                )
+            self._send_and_finish(
+                session,
+                job,
+                f"Администратор {target_id} добавлен. "
+                "Если он ещё не писал боту, ему нужно отправить /start.",
+                main_menu_markup(admin=True),
+            )
+            return
+
+        if target_id in self.settings.admin_ids():
+            self._send_and_finish(
+                session,
+                job,
+                "Это базовый администратор из ADMIN_TELEGRAM_IDS. "
+                "Его можно убрать только в защищённой конфигурации сервера.",
+                main_menu_markup(admin=True),
+            )
+            return
+        if target is None or target.role != "admin":
+            self._send_and_finish(
+                session,
+                job,
+                f"Пользователь {target_id} не является добавленным администратором.",
+                main_menu_markup(admin=True),
+            )
+            return
+        if target_id == job.telegram_user_id and len(
+            active_admin_ids(session, self.settings)
+        ) <= 1:
+            self._send_and_finish(
+                session,
+                job,
+                "Нельзя удалить последнего администратора.",
+                main_menu_markup(admin=True),
+            )
+            return
+        target.role = "pilot_user"
+        self._audit(
+            session,
+            admin_id=job.telegram_user_id,
+            action="admin_remove",
+            target_id=target_id,
+        )
+        self._notice(
+            session,
+            target_id,
+            target.chat_id,
+            "Права администратора сняты. Пользовательский доступ сохранён.",
+        )
+        self._send_and_finish(
+            session,
+            job,
+            f"Администратор {target_id} удалён. Пользовательский доступ сохранён.",
+            main_menu_markup(admin=True),
+        )
+
     def _process_admin_draft(self, session: Session, job: UpdateJob) -> bool:
-        if job.telegram_user_id not in self.settings.admin_ids():
+        if not is_admin(session, self.settings, job.telegram_user_id):
             return False
         edit_session, skill_name = self._selected_skill(session, job.telegram_user_id)
         if (
@@ -791,30 +1044,38 @@ class JobProcessor:
                 self._send_and_finish(session, job, "Не удалось обработать /start.")
             elif user.status == AccessStatus.pending:
                 if job.payload_text == "new":
-                    self._notify_access_request(user)
+                    self._notify_access_request(session, user)
                 self._send_and_finish(
                     session,
                     job,
                     "Запрос доступа отправлен администратору. "
                     "До подтверждения OpenAI и MCP не вызываются.",
+                    main_menu_markup(admin=False),
                 )
             elif user.status == AccessStatus.active:
                 self._send_and_finish(
                     session,
                     job,
-                    "Доступ активен. Отправьте текстовый запрос. "
-                    "Фактический статус интеграций: /mcp_status.",
+                    "Sales AI готов к работе.\n\n"
+                    "Напишите задачу обычным текстом или выберите действие ниже. "
+                    "Для Jira, Bitrix и KTalk сначала нужна корпоративная авторизация.",
+                    main_menu_markup(
+                        admin=is_admin(session, self.settings, job.telegram_user_id)
+                    ),
                 )
             else:
                 self._send_and_finish(session, job, "Доступ отозван. Обратитесь к администратору.")
-        elif job.kind == "help":
+        elif job.kind in {"menu", "help"}:
+            admin = is_admin(session, self.settings, job.telegram_user_id)
             self._send_and_finish(
                 session,
                 job,
-                "Команды: /start, /new, /login, /logout, /mcp_status, /help. "
-                "Для MCP: /mcp <jira|bitrix|ktalk> <запрос>. "
-                "Администратор: /mcp_discover <сервер>, /skills, /skill_show, /skill_edit, "
-                "/skill_cancel, /skill_rollback, /revoke <telegram_id>.",
+                (
+                    "Выберите действие или напишите задачу агенту."
+                    if job.kind == "menu"
+                    else help_text(admin=admin)
+                ),
+                main_menu_markup(admin=admin),
             )
         elif job.kind == "new":
             session.execute(
@@ -823,7 +1084,55 @@ class JobProcessor:
                     ConversationMessage.chat_id == job.chat_id,
                 )
             )
-            self._send_and_finish(session, job, "Контекст очищен. Начат новый диалог.")
+            self._send_and_finish(
+                session,
+                job,
+                "Контекст очищен. Начат новый диалог — напишите новую задачу.",
+                main_menu_markup(
+                    admin=is_admin(session, self.settings, job.telegram_user_id)
+                ),
+            )
+        elif job.kind == "auth":
+            try:
+                authorized = bool(
+                    self.oauth_store.access_token(session, job.telegram_user_id)
+                )
+            except (OAuthConfigurationError, OAuthLoginRequired):
+                authorized = False
+            text = (
+                "Корпоративная авторизация активна.\n\n"
+                "• /mcp_status — проверить интеграции;\n"
+                "• /logout — завершить сессию."
+                if authorized
+                else "Для Jira, Bitrix и KTalk выполните /login.\n\n"
+                "Бот пришлёт официальную ссылку Keycloak. Пароль и OTP в Telegram "
+                "отправлять не нужно."
+            )
+            self._send_and_finish(
+                session,
+                job,
+                text,
+                main_menu_markup(
+                    admin=is_admin(session, self.settings, job.telegram_user_id)
+                ),
+            )
+        elif job.kind == "tools":
+            self._send_and_finish(
+                session,
+                job,
+                "Подключённые инструменты\n\n"
+                "• Jira — задачи, поиск, поля, доски и спринты.\n"
+                "• Bitrix — сделки, лиды, контакты, компании, задачи и пользователи.\n"
+                "• KTalk — записи, участники, транскрипции и протоколы.\n\n"
+                "Можно просто написать запрос. Для принудительного выбора системы:\n"
+                "/mcp jira покажи SH-501\n"
+                "/mcp bitrix покажи мой профиль\n"
+                "/mcp ktalk покажи последние записи\n\n"
+                "Проверка подключения: /mcp_status.",
+                main_menu_markup(
+                    admin=is_admin(session, self.settings, job.telegram_user_id)
+                ),
+            )
         elif job.kind == "login":
             self._start_login(session, job, user)
         elif job.kind == "logout":
@@ -841,7 +1150,7 @@ class JobProcessor:
                 mcp_capability_note(self.settings, authorized=authorized),
             )
         elif job.kind == "mcp_discover":
-            if job.telegram_user_id not in self.settings.admin_ids():
+            if not is_admin(session, self.settings, job.telegram_user_id):
                 self._send_and_finish(session, job, "Команда доступна только администратору.")
             else:
                 label = (job.payload_text or "").strip().lower()
@@ -904,8 +1213,10 @@ class JobProcessor:
             "skill_rollback",
         }:
             self._process_skill_command(session, job)
+        elif job.kind in {"admin", "admins", "admin_add", "admin_remove"}:
+            self._process_admin_command(session, job)
         elif job.kind == "revoke":
-            if job.telegram_user_id not in self.settings.admin_ids():
+            if not is_admin(session, self.settings, job.telegram_user_id):
                 self._send_and_finish(session, job, "Команда доступна только администратору.")
             else:
                 try:

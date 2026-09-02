@@ -370,6 +370,90 @@ def test_admin_can_revoke_without_restart(runtime, post_update, drain):
         assert session.scalar(select(func.count(OAuthCredential.id))) == 0
 
 
+def test_main_menu_is_clear_and_maps_buttons_to_commands(runtime, post_update, drain):
+    post_update(telegram_update(1, 900, "/start"))
+    drain()
+    markup = runtime["telegram"].markups[-1]
+    labels = [button["text"] for row in markup["keyboard"] for button in row]
+    assert "🆕 Новый диалог" in labels
+    assert "👥 Администраторы" in labels
+
+    post_update(telegram_update(2, 900, "ℹ️ Возможности"))
+    drain()
+    help_message = runtime["telegram"].messages[-1][1]
+    assert "Что умеет Sales AI" in help_message
+    assert "Jira" in help_message
+    assert "/admin_add" in help_message
+
+    post_update(telegram_update(3, 900, "🧩 Инструменты"))
+    drain()
+    assert "Подключённые инструменты" in runtime["telegram"].messages[-1][1]
+
+
+def test_dynamic_admin_can_be_added_and_removed_without_restart(
+    runtime, post_update, drain
+):
+    post_update(telegram_update(1, 900, "/start"))
+    drain()
+    post_update(telegram_update(2, 900, "/admin_add 901"))
+    drain()
+    with runtime["factory"]() as session:
+        added = session.scalar(
+            select(UserAccess).where(UserAccess.telegram_user_id == 901)
+        )
+        assert added.role == "admin"
+        assert added.status == "active"
+
+    post_update(telegram_update(3, 901, "/start"))
+    drain()
+    assert "⚙️ Управление" in [
+        button["text"]
+        for row in runtime["telegram"].markups[-1]["keyboard"]
+        for button in row
+    ]
+    post_update(telegram_update(4, 901, "/admins"))
+    drain()
+    assert "добавлен через Telegram" in runtime["telegram"].messages[-1][1]
+
+    post_update(telegram_update(5, 900, "/admin_remove 901"))
+    drain()
+    with runtime["factory"]() as session:
+        removed = session.scalar(
+            select(UserAccess).where(UserAccess.telegram_user_id == 901)
+        )
+        assert removed.role == "pilot_user"
+        assert removed.status == "active"
+    post_update(telegram_update(6, 901, "/admins"))
+    drain()
+    assert "только администратору" in runtime["telegram"].messages[-1][1]
+
+
+def test_dynamic_admin_receives_access_requests(runtime, post_update, drain):
+    post_update(telegram_update(1, 900, "/start"))
+    drain()
+    post_update(telegram_update(2, 900, "/admin_add 901"))
+    drain()
+    post_update(telegram_update(3, 902, "/start"))
+    drain()
+    assert any(
+        chat_id == 901 and "Новый запрос доступа" in text
+        for chat_id, text in runtime["telegram"].messages
+    )
+
+
+def test_configured_admin_cannot_be_removed_in_chat(runtime, post_update, drain):
+    post_update(telegram_update(1, 900, "/start"))
+    drain()
+    post_update(telegram_update(2, 900, "/admin_remove 900"))
+    drain()
+    assert "ADMIN_TELEGRAM_IDS" in runtime["telegram"].messages[-1][1]
+
+
+def test_settings_accept_multiple_bootstrap_admins():
+    settings = Settings(app_env="test", admin_telegram_ids="900, 901,902")
+    assert settings.admin_ids() == {900, 901, 902}
+
+
 def test_project_bundle_loads_prompt_skill_and_override(runtime):
     instructions = load_project_instructions(
         runtime["settings"].project_dir,
@@ -405,8 +489,9 @@ def test_local_runtime_processes_configured_admin(runtime):
     )
     local = LocalBotRuntime(runtime["settings"], runtime["factory"], telegram, processor)
     assert local.start()["username"] == "local_test_bot"
+    assert any(item["command"] == "menu" for item in telegram.commands)
     assert local.poll_once() == 1
-    assert "Доступ активен" in telegram.messages[-1][1]
+    assert "Sales AI готов" in telegram.messages[-1][1]
 
 
 def test_cost_formula_separates_cached_input(runtime):

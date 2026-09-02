@@ -1,11 +1,13 @@
 # Modus Sales Telegram Bot — MVP
 
-Локальный Telegram-бот с OpenAI Responses API, общим набором skills и персональным доступом к Jira, Bitrix и KTalk MCP через Keycloak. Web-админки, ролей, индивидуальных tool-наборов и пользовательских лимитов в MVP нет.
+Локальный Telegram-бот с OpenAI Responses API, общим набором skills и персональным доступом к Jira, Bitrix и KTalk MCP через Keycloak. Краткая инструкция для пользователя и администратора: [docs/user-guide.md](docs/user-guide.md).
 
 ## Что реализовано
 
-- private Telegram chat и команды `/start`, `/help`, `/new`;
-- администраторы из `ADMIN_TELEGRAM_IDS`;
+- постоянное Telegram-меню с кнопками и понятной справкой;
+- стандартное меню `/` с описаниями основных команд;
+- несколько базовых администраторов из `ADMIN_TELEGRAM_IDS`;
+- добавление и удаление дополнительных администраторов через Telegram без перезапуска;
 - запрос доступа с Telegram-кнопками «Разрешить» и «Отклонить»;
 - отзыв доступа через `/revoke <telegram_id>` без перезапуска;
 - `/login` и `/logout` через Keycloak Device Flow либо Authorization Code + PKCE;
@@ -32,7 +34,7 @@ Live discovery через персональный Keycloak OAuth выполне
 .\scripts\local-start.ps1
 ```
 
-На Windows ту же команду можно запустить двойным кликом по `START_BOT.cmd` в корне проекта.
+На Windows ту же команду можно запустить двойным кликом по `START_BOT.cmd` в корне проекта. Файл безопасно перезапускает только локальный процесс этого бота. `STOP_BOT.cmd` останавливает его.
 
 Секреты сохраняются в игнорируемом `data/local-secrets.clixml` через Windows DPAPI и доступны только текущей учётной записи Windows. Все следующие запуски выполняются той же командой без повторного ввода. Для замены ключей:
 
@@ -40,10 +42,10 @@ Live discovery через персональный Keycloak OAuth выполне
 .\scripts\local-start.ps1 -Configure
 ```
 
-Числовой Telegram ID и Keycloak client можно задать сразу параметрами:
+Несколько Telegram ID администраторов и Keycloak client можно задать сразу параметрами:
 
 ```powershell
-.\scripts\local-start.ps1 -AdminTelegramId 123456789 -KeycloakClientId 'modus-sales-telegram-local'
+.\scripts\local-start.ps1 -AdminTelegramIds '123456789,987654321' -KeycloakClientId 'modus-sales-telegram-local'
 ```
 
 Постоянный локальный `TOKEN_ENCRYPTION_KEY` автоматически создаётся в игнорируемом `data/token-encryption.key`, поэтому OAuth-сессии переживают перезапуск.
@@ -51,13 +53,13 @@ Live discovery через персональный Keycloak OAuth выполне
 ## Локальный запуск в Docker
 
 ```powershell
-.\scripts\docker-up.ps1 -OpenAI -OwnerTelegramUserId 123456789
+.\scripts\docker-up.ps1 -OpenAI -AdminTelegramIds '123456789,987654321'
 ```
 
 С Keycloak:
 
 ```powershell
-.\scripts\docker-up.ps1 -OpenAI -OwnerTelegramUserId 123456789 -KeycloakClientId 'modus-sales-telegram-local'
+.\scripts\docker-up.ps1 -OpenAI -AdminTelegramIds '123456789,987654321' -KeycloakClientId 'modus-sales-telegram-local'
 ```
 
 Первый запуск создаёт игнорируемый `.env.docker.local`, запрашивает ключи и генерирует PostgreSQL password, webhook/safety secrets и постоянный Fernet key. Следующий `docker-up.ps1` использует сохранённые значения без вопросов. Для ротации передайте `-Configure -OpenAI`.
@@ -71,6 +73,7 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 ## Команды бота
 
 - `/start` — запросить или проверить доступ;
+- `/menu` — вернуть кнопки главного меню;
 - `/help` — показать помощь;
 - `/new` — удалить контекст диалога;
 - `/login` — начать настроенный корпоративный OAuth flow;
@@ -81,6 +84,9 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 - `/skills` — выбрать skill, только администратор;
 - `/skill_show`, `/skill_edit`, `/skill_cancel`, `/skill_rollback` — управление выбранным skill;
 - `/revoke 123456789` — отозвать доступ пользователя.
+- `/admins` — показать всех администраторов;
+- `/admin_add 123456789` — назначить дополнительного администратора;
+- `/admin_remove 123456789` — снять дополнительные административные права.
 
 Обычный запрос может использовать подключённые MCP автоматически. Ошибка или отсутствие OAuth не блокирует обычный ответ без MCP. Команда `/mcp` требует `/login` и хотя бы один разрешённый tool выбранного сервера.
 

@@ -72,3 +72,4 @@ def test_initial_migration_upgrades_a_new_database(tmp_path, monkeypatch):
 def test_webhook_registration_includes_admin_callbacks():
     script = (ROOT / "scripts" / "register_webhook.py").read_text(encoding="utf-8")
     assert '"allowed_updates": ["message", "callback_query"]' in script
+    assert "setMyCommands" in script

@@ -1,5 +1,6 @@
 param(
     [string]$KeycloakClientId = 'modus-sales-telegram-local',
+    [string]$AdminTelegramIds = '',
     [Nullable[long]]$AdminTelegramId
 )
 
@@ -21,15 +22,25 @@ if ($openAIKey.Length -eq 0) {
     throw 'OpenAI API key is empty.'
 }
 
-if ($null -eq $AdminTelegramId) {
-    $adminValue = Read-Host 'Your numeric Telegram user ID (pilot administrator)'
+if ($AdminTelegramIds.Trim()) {
+    $adminValue = $AdminTelegramIds
 }
-else {
+elseif ($null -ne $AdminTelegramId) {
     $adminValue = $AdminTelegramId.Value.ToString()
 }
-if ($adminValue -notmatch '^\d+$') {
-    throw 'Telegram user ID must contain digits only.'
+else {
+    $adminValue = Read-Host 'Administrator Telegram IDs, comma-separated'
 }
+$adminItems = @(
+    $adminValue.Split(',') |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ } |
+        Select-Object -Unique
+)
+if (-not $adminItems -or ($adminItems | Where-Object { $_ -notmatch '^\d+$' })) {
+    throw 'Administrator Telegram IDs must contain digits and be comma-separated.'
+}
+$adminValue = $adminItems -join ','
 if (-not $KeycloakClientId.Trim()) {
     throw 'Keycloak client ID must not be empty.'
 }

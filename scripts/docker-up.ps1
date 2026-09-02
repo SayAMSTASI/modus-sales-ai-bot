@@ -3,6 +3,7 @@ param(
     [switch]$Configure,
     [switch]$Foreground,
     [Nullable[long]]$OwnerTelegramUserId,
+    [string]$AdminTelegramIds = '',
     [string]$KeycloakClientId = ''
 )
 
@@ -68,16 +69,25 @@ if ($Configure -or $content -notmatch '(?m)^TELEGRAM_BOT_TOKEN=\s*\S.+$') {
     $content = Set-EnvValue $content 'TELEGRAM_BOT_TOKEN' $telegramToken
 }
 
-if ($null -ne $OwnerTelegramUserId) {
+if ($AdminTelegramIds.Trim()) {
+    if ($AdminTelegramIds -notmatch '^\d+(\s*,\s*\d+)*$') {
+        throw 'Administrator Telegram IDs must contain digits and be comma-separated.'
+    }
+    $ownerId = (($AdminTelegramIds -split ',') | ForEach-Object { $_.Trim() }) -join ','
+    $content = Set-EnvValue $content 'ADMIN_TELEGRAM_IDS' $ownerId
+    $content = Set-EnvValue $content 'PILOT_TELEGRAM_IDS' $ownerId
+}
+elseif ($null -ne $OwnerTelegramUserId) {
     $ownerId = $OwnerTelegramUserId.Value.ToString()
     $content = Set-EnvValue $content 'ADMIN_TELEGRAM_IDS' $ownerId
     $content = Set-EnvValue $content 'PILOT_TELEGRAM_IDS' $ownerId
 }
 elseif ($content -notmatch '(?m)^ADMIN_TELEGRAM_IDS=\s*\d') {
-    $ownerId = Read-Host 'Your numeric Telegram user ID (pilot administrator)'
-    if ($ownerId -notmatch '^\d+$') {
-        throw 'Telegram user ID must contain digits only.'
+    $ownerId = Read-Host 'Administrator Telegram IDs, comma-separated'
+    if ($ownerId -notmatch '^\d+(\s*,\s*\d+)*$') {
+        throw 'Administrator Telegram IDs must contain digits and be comma-separated.'
     }
+    $ownerId = (($ownerId -split ',') | ForEach-Object { $_.Trim() }) -join ','
     $content = Set-EnvValue $content 'ADMIN_TELEGRAM_IDS' $ownerId
     $content = Set-EnvValue $content 'PILOT_TELEGRAM_IDS' $ownerId
 }

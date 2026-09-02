@@ -80,10 +80,11 @@ elseif (-not $env:ADMIN_TELEGRAM_IDS -and $savedSecrets -and $savedSecrets.Admin
     Set-Content -LiteralPath $adminIdPath -Value $ownerId -Encoding ascii
 }
 elseif (-not $env:ADMIN_TELEGRAM_IDS) {
-    $ownerId = Read-Host 'Your numeric Telegram user ID (pilot administrator)'
-    if ($ownerId -notmatch '^\d+$') {
-        throw 'Telegram user ID must contain digits only.'
+    $ownerId = Read-Host 'Administrator Telegram IDs, comma-separated'
+    if ($ownerId -notmatch '^\d+(\s*,\s*\d+)*$') {
+        throw 'Administrator Telegram IDs must contain digits and be comma-separated.'
     }
+    $ownerId = (($ownerId -split ',') | ForEach-Object { $_.Trim() }) -join ','
     $env:ADMIN_TELEGRAM_IDS = $ownerId
     $env:PILOT_TELEGRAM_IDS = $ownerId
     Set-Content -LiteralPath $adminIdPath -Value $ownerId -Encoding ascii

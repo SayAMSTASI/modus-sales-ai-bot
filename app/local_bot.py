@@ -12,7 +12,7 @@ from app.db import initialize_development_schema, make_engine, make_session_fact
 from app.ingest import ingest_update
 from app.logging_config import configure_logging
 from app.metrics import build_metrics_exporter
-from app.telegram import HttpTelegramClient, PollingTelegramClient
+from app.telegram import BOT_COMMANDS, HttpTelegramClient, PollingTelegramClient
 from app.worker import JobProcessor
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ class LocalBotRuntime:
             drop_pending_updates=self.settings.telegram_drop_pending_updates
         )
         identity = self.telegram.get_me()
+        self.telegram.set_commands(BOT_COMMANDS)
         logger.info(
             "Telegram polling enabled for @%s (id=%s)",
             identity.get("username", "unknown"),

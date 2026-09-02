@@ -13,6 +13,17 @@ from app.config import Settings
 from app.models import AccessStatus, UpdateJob, UserAccess
 from app.policy import check_limits
 
+MENU_ACTIONS = {
+    "🆕 Новый диалог": "/new",
+    "🔐 Авторизация": "/auth",
+    "🧩 Инструменты": "/tools",
+    "ℹ️ Возможности": "/help",
+    "👥 Администраторы": "/admins",
+    "🛠 Навыки": "/skills",
+    "🔎 MCP статус": "/mcp_status",
+    "⚙️ Управление": "/admin",
+}
+
 
 def _request_number(user_id: int) -> str:
     today = datetime.now(UTC).strftime("%Y%m%d")
@@ -130,9 +141,11 @@ def ingest_update(
         user = session.scalar(select(UserAccess).where(UserAccess.telegram_user_id == user_id))
         sender = update.get("message", {}).get("from") or {}
         username = str(sender.get("username") or "") or None
-        command = (
-            text.split(maxsplit=1)[0].lower()
-            if isinstance(text, str) and text.startswith("/")
+        normalized_text = text.strip() if isinstance(text, str) else ""
+        menu_command = MENU_ACTIONS.get(normalized_text, "")
+        command = menu_command or (
+            normalized_text.split(maxsplit=1)[0].lower()
+            if normalized_text.startswith("/")
             else ""
         )
 
@@ -197,8 +210,13 @@ def ingest_update(
         payload = text if isinstance(text, str) else None
         if command in {
             "/start",
+            "/menu",
             "/help",
             "/new",
+            "/auth",
+            "/tools",
+            "/admin",
+            "/admins",
             "/login",
             "/logout",
             "/mcp_status",
@@ -219,13 +237,24 @@ def ingest_update(
         elif command == "/revoke":
             kind = "revoke"
             payload = text.removeprefix("/revoke").strip() if isinstance(text, str) else ""
+        elif command in {"/admin_add", "/admin_remove"}:
+            kind = command[1:]
+            payload = (
+                normalized_text.removeprefix(command).strip()
+                if isinstance(text, str)
+                else ""
+            )
         elif text is None:
             kind = "unsupported"
             payload = None
         elif len(text) > settings.max_message_chars:
             kind = "too_long"
             payload = None
-        elif user is None or user.status != AccessStatus.active or user.role != "pilot_user":
+        elif (
+            user is None
+            or user.status != AccessStatus.active
+            or user.role not in {"pilot_user", "admin"}
+        ):
             kind = "access_denied"
             payload = None
         else:

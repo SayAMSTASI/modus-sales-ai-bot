@@ -21,7 +21,7 @@
 - TLS-сертификат;
 - Telegram bot token;
 - OpenAI Project API key;
-- числовые Telegram ID администраторов;
+- числовые Telegram ID одного или нескольких базовых администраторов;
 - сервер Linux с Docker Engine и Compose plugin;
 - исходящий HTTPS к:
   - `api.telegram.org`;
@@ -163,6 +163,8 @@ TOKEN_ENCRYPTION_KEY=<fernet-secret>
 ```
 
 `TOKEN_ENCRYPTION_KEY` должен быть постоянным Fernet key. Его потеря сделает сохранённые OAuth-токены нечитаемыми; компрометация требует замены ключа и повторного `/login` всех пользователей.
+
+`ADMIN_TELEGRAM_IDS` — аварийный список базовых администраторов. Дополнительные администраторы назначаются через `/admin_add <Telegram ID>` и хранятся в PostgreSQL; изменения работают без перезапуска.
 
 Для production предпочтительно передавать значения из Vault/CI/CD secret storage. Если используется env-файл, не включать его в backup репозитория и артефакты сборки.
 
