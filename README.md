@@ -28,6 +28,8 @@
   без копирования ответов агента;
 - агрегированные tokens/cost/latency/error metrics и статистика удовлетворённости;
 - двусторонние вложения: PDF, TXT, CSV, JSON, DOCX, XLSX, PPTX, JPEG, PNG и WebP
+- создание PDF, DOCX, XLSX, PPTX, CSV и TXT через OpenAI Code Interpreter с
+  автоматической отправкой результата в Telegram
   принимаются из Telegram; изображения OpenAI и файловые результаты MCP возвращаются
   пользователю как Telegram-фото или документы;
 - проверка MIME/размера, allowlist хостов скачивания и шифрование исходящих файлов,
@@ -129,6 +131,8 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 - `ATTACHMENT_MAX_INPUT_BYTES`, `ATTACHMENT_MAX_OUTPUT_BYTES` — предельный размер файла;
 - `ATTACHMENT_ALLOWED_MIME_TYPES` — разрешённые форматы;
 - `ATTACHMENT_DOWNLOAD_ALLOWED_HOSTS` — дополнительные HTTPS-хосты для ссылок MCP;
+- `OPENAI_ENABLE_CODE_INTERPRETER` — разрешить создание файлов через Python tool;
+- `OPENAI_CODE_INTERPRETER_MEMORY_LIMIT` — память контейнера (`1g` по умолчанию);
 - `OPENAI_ENABLE_IMAGE_GENERATION=true` — разрешить встроенный инструмент создания изображений.
 
 Все три MCP получают персональный Keycloak token текущего Telegram-пользователя. Статические MCP-токены из environment больше не используются.

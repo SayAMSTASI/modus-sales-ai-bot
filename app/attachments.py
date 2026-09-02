@@ -46,6 +46,8 @@ class AgentAttachment:
     data: bytes | None = None
     source_url: str | None = None
     source_server: str | None = None
+    source_container_id: str | None = None
+    source_file_id: str | None = None
 
 
 def safe_filename(value: str | None, *, default: str = "attachment.bin") -> str:
@@ -210,6 +212,7 @@ def extract_response_attachments(
     max_bytes: int,
 ) -> list[AgentAttachment]:
     found: list[AgentAttachment] = []
+    container_files: set[tuple[str, str]] = set()
 
     def add_inline(
         data_value: str,
@@ -254,6 +257,30 @@ def extract_response_attachments(
                 kind=_attachment_kind(resolved_mime.lower()),
                 source_url=url,
                 source_server=source_server,
+            )
+        )
+
+    def add_container_file(annotation: dict[str, Any]) -> None:
+        if len(found) >= max_count:
+            return
+        container_id = str(annotation.get("container_id") or "").strip()
+        file_id = str(annotation.get("file_id") or "").strip()
+        if not container_id or not file_id or (container_id, file_id) in container_files:
+            return
+        container_files.add((container_id, file_id))
+        filename = safe_filename(
+            str(annotation.get("filename") or ""),
+            default=f"generated-{len(found) + 1}.bin",
+        )
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        found.append(
+            AgentAttachment(
+                filename=filename,
+                mime_type=mime_type.lower(),
+                kind=_attachment_kind(mime_type.lower()),
+                source_server="openai",
+                source_container_id=container_id,
+                source_file_id=file_id,
             )
         )
 
@@ -324,6 +351,16 @@ def extract_response_attachments(
                 filename=f"generated-{item.get('id') or len(found) + 1}.png",
                 source_server=None,
             )
+            continue
+        if item.get("type") == "message":
+            for content_item in item.get("content") or []:
+                content = _object_dict(content_item)
+                if not content:
+                    continue
+                for annotation_item in content.get("annotations") or []:
+                    annotation = _object_dict(annotation_item)
+                    if annotation and annotation.get("type") == "container_file_citation":
+                        add_container_file(annotation)
             continue
         if item.get("type") != "mcp_call" or not isinstance(item.get("output"), str):
             continue

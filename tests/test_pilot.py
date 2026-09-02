@@ -318,6 +318,35 @@ def test_openai_and_mcp_inline_outputs_are_extracted_as_attachments():
     assert attachments[1].source_server == "ktalk"
 
 
+def test_openai_container_file_citation_is_extracted_once():
+    annotation = SimpleNamespace(
+        type="container_file_citation",
+        container_id="cntr-1",
+        file_id="cfile-1",
+        filename="sales-report.xlsx",
+    )
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                content=[
+                    SimpleNamespace(type="output_text", annotations=[annotation, annotation])
+                ],
+            )
+        ]
+    )
+
+    attachments = extract_response_attachments(response, max_count=4, max_bytes=1024)
+
+    assert len(attachments) == 1
+    assert attachments[0].filename == "sales-report.xlsx"
+    assert attachments[0].mime_type == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert attachments[0].source_container_id == "cntr-1"
+    assert attachments[0].source_file_id == "cfile-1"
+
+
 def test_new_requires_feedback_and_clears_context_after_rating(
     runtime, post_update, drain
 ):
@@ -1000,7 +1029,11 @@ def test_optional_mcp_failure_retries_plain_openai_request():
     )
     assert result.text == "Ответ без MCP"
     assert fake_responses.calls[0]["tools"]
-    assert fake_responses.calls[1]["tools"] == []
+    assert all(item["type"] != "mcp" for item in fake_responses.calls[1]["tools"])
+    assert {item["type"] for item in fake_responses.calls[1]["tools"]} == {
+        "image_generation",
+        "code_interpreter",
+    }
 
 
 def test_checked_in_mcp_registry_is_read_only():
@@ -1038,4 +1071,52 @@ def test_checked_in_mcp_registry_is_read_only():
     )
     mcp_tools = [item for item in attached if item["type"] == "mcp"]
     assert [item["server_label"] for item in mcp_tools] == ["jira", "bitrix", "ktalk"]
-    assert attached[-1] == {"type": "image_generation"}
+    assert {item["type"] for item in attached[-2:]} == {
+        "image_generation",
+        "code_interpreter",
+    }
+    assert attached[-1]["container"] == {"type": "auto", "memory_limit": "1g"}
+
+
+def test_openai_container_file_is_downloaded_for_telegram():
+    settings = Settings(
+        app_env="test",
+        openai_api_key="test-key",
+        project_dir="config/project",
+        mcp_servers_json="[]",
+    )
+    client = OpenAIAgentClient(settings)
+
+    class FakeContent:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def iter_bytes(self):
+            yield b"xlsx-"
+            yield b"payload"
+
+        def close(self):
+            self.closed = True
+
+    generated = FakeContent()
+    fake_content_api = SimpleNamespace(
+        retrieve=lambda file_id, *, container_id: generated
+    )
+    client.client = SimpleNamespace(
+        containers=SimpleNamespace(files=SimpleNamespace(content=fake_content_api))
+    )
+    attachment = AgentAttachment(
+        filename="sales-report.xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        kind="document",
+        source_server="openai",
+        source_container_id="cntr-1",
+        source_file_id="cfile-1",
+    )
+
+    downloaded = client._download_container_attachment(attachment)
+
+    assert downloaded.data == b"xlsx-payload"
+    assert downloaded.source_container_id is None
+    assert downloaded.source_file_id is None
+    assert generated.closed is True

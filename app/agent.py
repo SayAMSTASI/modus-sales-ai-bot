@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 from openai import OpenAI
 
-from app.attachments import AgentAttachment, extract_response_attachments
+from app.attachments import AgentAttachment, AttachmentError, extract_response_attachments
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -187,9 +188,51 @@ class OpenAIAgentClient:
             raise McpUnavailableError(
                 f"MCP server {required_mcp_server} has no allowed tools"
             )
-        if self.settings.openai_enable_image_generation and not required_mcp_server:
+        if self.settings.openai_enable_image_generation:
             tools.append({"type": "image_generation"})
+        if self.settings.openai_enable_code_interpreter:
+            tools.append(
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto",
+                        "memory_limit": self.settings.openai_code_interpreter_memory_limit,
+                    },
+                }
+            )
         return tools
+
+    def _download_container_attachment(self, attachment: AgentAttachment) -> AgentAttachment:
+        if not attachment.source_container_id or not attachment.source_file_id:
+            return attachment
+        content = self.client.containers.files.content.retrieve(
+            attachment.source_file_id,
+            container_id=attachment.source_container_id,
+        )
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            for chunk in content.iter_bytes():
+                total += len(chunk)
+                if total > self.settings.attachment_max_output_bytes:
+                    raise AttachmentError("Generated file exceeds the configured output limit")
+                chunks.append(chunk)
+        finally:
+            content.close()
+        mime_type = (
+            mimetypes.guess_type(attachment.filename)[0]
+            or attachment.mime_type
+            or "application/octet-stream"
+        ).lower()
+        if mime_type not in self.settings.allowed_attachment_mime_types():
+            raise AttachmentError("Generated file MIME type is not allowed")
+        return AgentAttachment(
+            filename=attachment.filename,
+            mime_type=mime_type,
+            kind="photo" if mime_type in {"image/jpeg", "image/png", "image/webp"} else "document",
+            data=b"".join(chunks),
+            source_server="openai",
+        )
 
     def respond(
         self,
@@ -233,10 +276,14 @@ class OpenAIAgentClient:
         try:
             response = self.client.responses.create(**kwargs)
         except Exception:
-            if required_mcp_server or not kwargs["tools"]:
+            if required_mcp_server or not any(
+                tool.get("type") == "mcp" for tool in kwargs["tools"]
+            ):
                 raise
             logger.warning("OpenAI request with optional MCP failed; retrying without MCP")
-            kwargs["tools"] = []
+            kwargs["tools"] = [
+                tool for tool in kwargs["tools"] if tool.get("type") != "mcp"
+            ]
             response = self.client.responses.create(**kwargs)
         response_usage = getattr(response, "usage", None)
         details = getattr(response_usage, "input_tokens_details", None)
@@ -250,13 +297,23 @@ class OpenAIAgentClient:
             max_count=self.settings.attachment_max_output_count,
             max_bytes=self.settings.attachment_max_output_bytes,
         )
+        materialized_attachments: list[AgentAttachment] = []
+        for attachment in attachments:
+            try:
+                materialized_attachments.append(self._download_container_attachment(attachment))
+            except Exception:
+                logger.warning(
+                    "Generated OpenAI attachment skipped name=%s",
+                    attachment.filename,
+                    exc_info=True,
+                )
         return AgentResult(
             text=response.output_text or "",
             request_id=response.id,
             model=response.model,
             duration_ms=int((monotonic() - started) * 1000),
             usage=usage,
-            attachments=tuple(attachments),
+            attachments=tuple(materialized_attachments),
         )
 
 

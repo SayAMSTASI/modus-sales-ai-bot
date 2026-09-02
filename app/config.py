@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "low"
     openai_max_output_tokens: int = 1200
     openai_enable_image_generation: bool = True
+    openai_enable_code_interpreter: bool = True
+    openai_code_interpreter_memory_limit: Literal["1g", "4g", "16g", "64g"] = "1g"
     openai_input_usd_per_mtok: float = 2.0
     openai_cached_input_usd_per_mtok: float = 0.2
     openai_output_usd_per_mtok: float = 12.0
