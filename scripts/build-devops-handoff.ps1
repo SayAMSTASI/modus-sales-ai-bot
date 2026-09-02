@@ -152,6 +152,9 @@ print(json.dumps({"counts": counts, "users": users}, ensure_ascii=False))
         'OPENAI_MODEL=gpt-5.6-luna'
         'OPENAI_REASONING_EFFORT=low'
         'OPENAI_MAX_OUTPUT_TOKENS=1200'
+        'OPENAI_ENABLE_IMAGE_GENERATION=true'
+        'OPENAI_ENABLE_CODE_INTERPRETER=true'
+        'OPENAI_CODE_INTERPRETER_MEMORY_LIMIT=1g'
         'KEYCLOAK_FLOW=authorization_code'
         'KEYCLOAK_ISSUER=https://auth.modusbi.ru/realms/master'
         "KEYCLOAK_CLIENT_ID=$KeycloakClientId"
@@ -170,6 +173,12 @@ print(json.dumps({"counts": counts, "users": users}, ensure_ascii=False))
         'QUESTION_AUDIT_RETENTION_DAYS=30'
         'QUESTION_AUDIT_MAX_CHARS=4000'
         'ADMIN_USERS_PAGE_SIZE=10'
+        'ATTACHMENT_MAX_INPUT_BYTES=10485760'
+        'ATTACHMENT_MAX_OUTPUT_BYTES=10485760'
+        'ATTACHMENT_MAX_OUTPUT_COUNT=4'
+        'ATTACHMENT_HTTP_TIMEOUT_SECONDS=30'
+        'ATTACHMENT_ALLOWED_MIME_TYPES=image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown,text/csv,application/json,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        'ATTACHMENT_DOWNLOAD_ALLOWED_HOSTS='
         'MCP_SERVERS_FILE=config/mcp_servers.json'
     ) -join "`n"
     Write-Utf8 (Join-Path $secretsDirectory '.env.production') ($envContent + "`n")
@@ -191,7 +200,7 @@ print(json.dumps({"counts": counts, "users": users}, ensure_ascii=False))
         includes_production_secrets = $true
         includes_personal_data = $true
         token_encryption_key_matches_sqlite = $true
-        known_blocker = '188.120.251.22 could not reach api.telegram.org:443 on 2026-09-02'
+        deployment_host = 'selected by DevOps; not embedded in the package'
     }
     Write-Utf8 (Join-Path $stagingDirectory 'manifest.json') (
         $manifest | ConvertTo-Json -Depth 8
