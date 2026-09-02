@@ -35,7 +35,7 @@ from app.models import (
 )
 from app.oauth import KeycloakOAuthClient, TokenPollResult, TokenResponse
 from app.skills import active_skill_version
-from app.telegram import InMemoryTelegramClient
+from app.telegram import HttpTelegramClient, InMemoryTelegramClient, render_telegram_html
 from app.worker import JobProcessor, shared_allowed_tools
 from tests.conftest import callback_update, telegram_update
 
@@ -239,7 +239,9 @@ def test_login_poll_and_logout_store_only_encrypted_tokens(runtime, post_update,
     approve_user(runtime, post_update, drain)
     post_update(telegram_update(3, 101, "/login"))
     drain()
-    assert "auth.example" in runtime["telegram"].messages[-1][1]
+    assert "auth.example" in runtime["telegram"].markups[-1]["inline_keyboard"][0][0][
+        "url"
+    ]
 
     with runtime["factory"]() as session:
         device = session.scalar(select(OAuthDeviceSession))
@@ -277,7 +279,8 @@ def test_authorization_code_pkce_callback_is_one_time(runtime, post_update, drai
     runtime["settings"].public_base_url = "https://bot.example"
     post_update(telegram_update(3, 101, "/login"))
     drain()
-    assert "code_challenge_method=S256" in runtime["telegram"].messages[-1][1]
+    login_url = runtime["telegram"].markups[-1]["inline_keyboard"][0][0]["url"]
+    assert "code_challenge_method=S256" in login_url
 
     with runtime["factory"]() as session:
         authorization = session.scalar(select(OAuthAuthorizationSession))
@@ -362,17 +365,22 @@ def test_mcp_requires_login(runtime, post_update, drain):
     post_update(telegram_update(3, 101, "/mcp jira покажи SH-501"))
     drain()
     assert runtime["agent"].calls == 0
-    assert "/login" in runtime["telegram"].messages[-1][1]
+    assert "Авторизация" in runtime["telegram"].messages[-1][1]
 
 
 def test_admin_edits_applies_and_rolls_back_skill(runtime, post_update, drain):
     post_update(telegram_update(1, 900, "/start"))
     drain()
-    post_update(telegram_update(2, 900, "/skills"))
+    post_update(telegram_update(2, 900, "🛠 Навыки"))
     drain()
     post_update(callback_update(3, 900, "skill:select:sales-core"))
     drain()
-    post_update(telegram_update(4, 900, "/skill_edit"))
+    assert any(
+        button["callback_data"] == "skill:edit"
+        for row in runtime["telegram"].markups[-1]["inline_keyboard"]
+        for button in row
+    )
+    post_update(callback_update(4, 900, "skill:edit"))
     drain()
     post_update(telegram_update(5, 900, "# Updated sales skill\nТолько тестовый текст."))
     drain()
@@ -388,7 +396,7 @@ def test_admin_edits_applies_and_rolls_back_skill(runtime, post_update, drain):
         "# Updated sales skill"
     )
 
-    post_update(telegram_update(8, 900, "/skill_rollback"))
+    post_update(callback_update(8, 900, "skill:rollback"))
     drain()
     with runtime["factory"]() as session:
         assert active_skill_version(session, "sales-core") is None
@@ -517,19 +525,89 @@ def test_main_menu_is_clear_and_maps_buttons_to_commands(runtime, post_update, d
     help_message = runtime["telegram"].messages[-1][1]
     assert "Что умеет Sales AI" in help_message
     assert "Jira" in help_message
-    assert "/admin_add" in help_message
+    assert "Все основные действия выполняются кнопками" in help_message
+    assert "/admin_add" not in help_message
 
     post_update(telegram_update(3, 900, "🧩 Инструменты"))
     drain()
     assert "Подключённые инструменты" in runtime["telegram"].messages[-1][1]
 
+    post_update(telegram_update(4, 900, "⚙️ Управление"))
+    drain()
+    admin_buttons = [
+        button["text"]
+        for row in runtime["telegram"].markups[-1]["inline_keyboard"]
+        for button in row
+    ]
+    assert "👤 Пользователи" in admin_buttons
+    assert "👥 Администраторы" in admin_buttons
+
+
+def test_authorization_screen_uses_buttons(runtime, post_update, drain):
+    approve_user(runtime, post_update, drain)
+    post_update(telegram_update(3, 101, "🔐 Авторизация"))
+    drain()
+    message = runtime["telegram"].messages[-1][1]
+    buttons = [
+        button
+        for row in runtime["telegram"].markups[-1]["inline_keyboard"]
+        for button in row
+    ]
+    assert "/login" not in message
+    assert any(button.get("callback_data") == "oauth:login" for button in buttons)
+
+    post_update(callback_update(4, 101, "oauth:login"))
+    drain()
+    assert runtime["telegram"].markups[-1]["inline_keyboard"][0][0]["url"].startswith(
+        "https://auth.example/"
+    )
+
+
+def test_telegram_renderer_hides_markdown_headings_and_uses_html():
+    rendered = render_telegram_html("## Итоги\n- Первый пункт\n**Важно** и `код` & <tag>")
+    assert "##" not in rendered
+    assert "<b>▸ Итоги</b>" in rendered
+    assert "• Первый пункт" in rendered
+    assert "<b>Важно</b>" in rendered
+    assert "<code>код</code>" in rendered
+    assert "&amp; &lt;tag&gt;" in rendered
+
+    payloads = []
+    client = HttpTelegramClient("not-a-real-token")
+    client._post = lambda method, payload, **kwargs: payloads.append(  # type: ignore[method-assign]
+        (method, payload)
+    )
+    client.send_message(101, "# Заголовок\nТекст")
+    assert payloads[0][0] == "sendMessage"
+    assert payloads[0][1]["parse_mode"] == "HTML"
+    assert payloads[0][1]["text"].startswith("<b>◆ Заголовок</b>")
+
 
 def test_dynamic_admin_can_be_added_and_removed_without_restart(
     runtime, post_update, drain
 ):
-    post_update(telegram_update(1, 900, "/start"))
+    approve_user(runtime, post_update, drain, user_id=901)
+    post_update(telegram_update(3, 900, "👥 Администраторы"))
     drain()
-    post_update(telegram_update(2, 900, "/admin_add 901"))
+    assert "➕ Добавить администратора" in [
+        button["text"]
+        for row in runtime["telegram"].markups[-1]["inline_keyboard"]
+        for button in row
+    ]
+    post_update(callback_update(4, 900, "admin:pick_add:0"))
+    drain()
+    candidate_buttons = [
+        button
+        for row in runtime["telegram"].markups[-1]["inline_keyboard"]
+        for button in row
+    ]
+    assert any(button["callback_data"] == "admin:confirm_add:901" for button in candidate_buttons)
+    post_update(callback_update(5, 900, "admin:confirm_add:901"))
+    drain()
+    assert runtime["telegram"].markups[-1]["inline_keyboard"][0][0][
+        "callback_data"
+    ] == "admin:add:901"
+    post_update(callback_update(6, 900, "admin:add:901"))
     drain()
     with runtime["factory"]() as session:
         added = session.scalar(
@@ -538,18 +616,22 @@ def test_dynamic_admin_can_be_added_and_removed_without_restart(
         assert added.role == "admin"
         assert added.status == "active"
 
-    post_update(telegram_update(3, 901, "/start"))
+    post_update(telegram_update(7, 901, "/start"))
     drain()
     assert "⚙️ Управление" in [
         button["text"]
         for row in runtime["telegram"].markups[-1]["keyboard"]
         for button in row
     ]
-    post_update(telegram_update(4, 901, "/admins"))
+    post_update(telegram_update(8, 901, "/admins"))
     drain()
-    assert "добавлен через Telegram" in runtime["telegram"].messages[-1][1]
+    assert "назначен в боте" in runtime["telegram"].messages[-1][1]
 
-    post_update(telegram_update(5, 900, "/admin_remove 901"))
+    post_update(callback_update(9, 900, "admin:pick_remove:0"))
+    drain()
+    post_update(callback_update(10, 900, "admin:confirm_remove:901"))
+    drain()
+    post_update(callback_update(11, 900, "admin:remove:901"))
     drain()
     with runtime["factory"]() as session:
         removed = session.scalar(
@@ -557,17 +639,16 @@ def test_dynamic_admin_can_be_added_and_removed_without_restart(
         )
         assert removed.role == "pilot_user"
         assert removed.status == "active"
-    post_update(telegram_update(6, 901, "/admins"))
+    post_update(telegram_update(12, 901, "/admins"))
     drain()
     assert "только администратору" in runtime["telegram"].messages[-1][1]
 
 
 def test_dynamic_admin_receives_access_requests(runtime, post_update, drain):
-    post_update(telegram_update(1, 900, "/start"))
+    approve_user(runtime, post_update, drain, user_id=901)
+    post_update(callback_update(3, 900, "admin:add:901"))
     drain()
-    post_update(telegram_update(2, 900, "/admin_add 901"))
-    drain()
-    post_update(telegram_update(3, 902, "/start"))
+    post_update(telegram_update(4, 902, "/start"))
     drain()
     assert any(
         chat_id == 901 and "Новый запрос доступа" in text
