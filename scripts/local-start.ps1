@@ -9,9 +9,11 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $secretFile = Join-Path $projectRoot 'data\local-secrets.clixml'
 
 if ($Configure -or -not (Test-Path -LiteralPath $secretFile)) {
-    $configureArguments = @('-KeycloakClientId', $KeycloakClientId)
+    $configureArguments = @{
+        KeycloakClientId = $KeycloakClientId
+    }
     if ($null -ne $AdminTelegramId) {
-        $configureArguments += @('-AdminTelegramId', $AdminTelegramId.Value)
+        $configureArguments.AdminTelegramId = $AdminTelegramId.Value
     }
     & (Join-Path $PSScriptRoot 'local-configure.ps1') @configureArguments
 }
