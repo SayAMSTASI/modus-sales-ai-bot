@@ -201,6 +201,8 @@ def ingest_update(
             "/new",
             "/login",
             "/logout",
+            "/mcp_status",
+            "/mcp_discover",
             "/skills",
             "/skill_show",
             "/skill_edit",
@@ -208,7 +210,12 @@ def ingest_update(
             "/skill_rollback",
         }:
             kind = command[1:]
-            payload = "new" if command == "/start" and created else None
+            if command == "/start" and created:
+                payload = "new"
+            elif command == "/mcp_discover" and isinstance(text, str):
+                payload = text.removeprefix("/mcp_discover").strip().lower()
+            else:
+                payload = None
         elif command == "/revoke":
             kind = "revoke"
             payload = text.removeprefix("/revoke").strip() if isinstance(text, str) else ""

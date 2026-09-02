@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.agent import MockAgentClient
 from app.config import Settings
 from app.main import create_app
+from app.mcp_discovery import McpToolInfo
 from app.metrics import NullMetricsExporter
 from app.oauth import (
     AuthorizationCodeStart,
@@ -79,6 +80,18 @@ class FakeOAuthClient:
         self.revoked_tokens.append(token)
 
 
+class FakeMcpDiscoveryClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def list_tools(self, server, access_token: str) -> list[McpToolInfo]:
+        self.calls.append((server.server_label, access_token))
+        return [
+            McpToolInfo(name="crm_deal_list", description="List CRM deals"),
+            McpToolInfo(name="crm_deal_get", description="Read a CRM deal"),
+        ]
+
+
 @pytest.fixture
 def runtime(tmp_path: Path):
     settings = Settings(
@@ -97,6 +110,7 @@ def runtime(tmp_path: Path):
     telegram = InMemoryTelegramClient()
     oauth_client = FakeOAuthClient()
     oauth_store = OAuthTokenStore(settings, oauth_client)  # type: ignore[arg-type]
+    mcp_discovery = FakeMcpDiscoveryClient()
     app = create_app(settings, oauth_store)
     processor = JobProcessor(
         settings,
@@ -105,6 +119,7 @@ def runtime(tmp_path: Path):
         telegram,
         NullMetricsExporter(),
         oauth_store,
+        mcp_discovery,  # type: ignore[arg-type]
     )
     with TestClient(app) as client:
         yield {
@@ -117,6 +132,7 @@ def runtime(tmp_path: Path):
             "factory": app.state.session_factory,
             "oauth_client": oauth_client,
             "oauth_store": oauth_store,
+            "mcp_discovery": mcp_discovery,
         }
 
 

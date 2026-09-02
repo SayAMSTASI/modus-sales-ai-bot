@@ -22,9 +22,18 @@ services:
     env_file: ${ENV_FILE:-.env.docker.local}
     command: python -m app.local_bot
     depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    image: modus-sales-bot:local
+    env_file: ${ENV_FILE:-.env.docker.local}
+    command: alembic upgrade head
+    depends_on:
       db:
         condition: service_healthy
-    restart: unless-stopped
 
 volumes:
   sales_bot_local_db:

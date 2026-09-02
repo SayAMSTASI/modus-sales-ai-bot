@@ -1,5 +1,6 @@
 param(
     [switch]$OpenAI,
+    [switch]$Configure,
     [switch]$Foreground,
     [Nullable[long]]$OwnerTelegramUserId,
     [string]$KeycloakClientId = ''
@@ -59,11 +60,13 @@ if ($content -notmatch '(?m)^TOKEN_ENCRYPTION_KEY=.+$') {
     $tokenKey = [Convert]::ToBase64String($tokenBytes).Replace('+', '-').Replace('/', '_')
     $content = Set-EnvValue $content 'TOKEN_ENCRYPTION_KEY' $tokenKey
 }
-$telegramToken = Read-Secret 'Telegram bot token from @BotFather'
-if (-not $telegramToken) {
-    throw 'Telegram bot token is empty.'
+if ($Configure -or $content -notmatch '(?m)^TELEGRAM_BOT_TOKEN=\s*\S.+$') {
+    $telegramToken = Read-Secret 'Telegram bot token from @BotFather'
+    if (-not $telegramToken) {
+        throw 'Telegram bot token is empty.'
+    }
+    $content = Set-EnvValue $content 'TELEGRAM_BOT_TOKEN' $telegramToken
 }
-$content = Set-EnvValue $content 'TELEGRAM_BOT_TOKEN' $telegramToken
 
 if ($null -ne $OwnerTelegramUserId) {
     $ownerId = $OwnerTelegramUserId.Value.ToString()
@@ -82,18 +85,22 @@ elseif ($content -notmatch '(?m)^ADMIN_TELEGRAM_IDS=\s*\d') {
 if ($KeycloakClientId) {
     $content = Set-EnvValue $content 'KEYCLOAK_CLIENT_ID' $KeycloakClientId
 }
+elseif ($content -notmatch '(?m)^KEYCLOAK_CLIENT_ID=\s*\S.+$') {
+    $content = Set-EnvValue $content 'KEYCLOAK_CLIENT_ID' 'modus-sales-telegram-local'
+}
 
-if ($OpenAI) {
-    $openAIKey = Read-Secret 'OpenAI project API key'
-    if (-not $openAIKey) {
-        throw 'OpenAI API key is empty.'
+if ($OpenAI -or $content -match '(?m)^OPENAI_API_KEY=\s*\S.+$') {
+    if ($Configure -or $content -notmatch '(?m)^OPENAI_API_KEY=\s*\S.+$') {
+        $openAIKey = Read-Secret 'OpenAI project API key'
+        if (-not $openAIKey) {
+            throw 'OpenAI API key is empty.'
+        }
+        $content = Set-EnvValue $content 'OPENAI_API_KEY' $openAIKey
     }
     $content = Set-EnvValue $content 'AGENT_BACKEND' 'openai'
-    $content = Set-EnvValue $content 'OPENAI_API_KEY' $openAIKey
 }
 else {
     $content = Set-EnvValue $content 'AGENT_BACKEND' 'mock'
-    $content = Set-EnvValue $content 'OPENAI_API_KEY' ''
 }
 
 Set-Content -LiteralPath $envFile -Value $content -Encoding utf8NoBOM

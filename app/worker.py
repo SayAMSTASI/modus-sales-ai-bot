@@ -14,8 +14,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent import AgentClient, McpUnavailableError, build_agent_client, calculate_cost_usd
 from app.config import Settings, get_settings
-from app.db import Base, make_engine, make_session_factory
+from app.db import initialize_development_schema, make_engine, make_session_factory
 from app.logging_config import configure_logging
+from app.mcp_discovery import McpDiscoveryClient, McpDiscoveryError
 from app.metrics import MetricsExporter, build_metrics_exporter
 from app.models import (
     AccessStatus,
@@ -75,6 +76,25 @@ def shared_allowed_tools(settings: Settings) -> list[str]:
     ]
 
 
+def mcp_capability_note(settings: Settings, *, authorized: bool) -> str:
+    lines = [
+        "Фактическая доступность MCP в текущем запросе:",
+    ]
+    for server in settings.mcp_servers():
+        if not server.allowed_tools:
+            status = "отключён: read-only allowlist пока пуст"
+        elif authorized:
+            status = f"подключён; разрешено tools: {', '.join(server.allowed_tools)}"
+        else:
+            status = "не подключён: пользователь не выполнил /login"
+        lines.append(f"- {server.server_label}: {status}.")
+    lines.append(
+        "Не заявляй, что можешь использовать отключённый или неавторизованный MCP. "
+        "Если нужного MCP нет, прямо назови причину и предложи /login или /mcp_status."
+    )
+    return "\n".join(lines)
+
+
 class JobProcessor:
     def __init__(
         self,
@@ -84,6 +104,7 @@ class JobProcessor:
         telegram: TelegramClient,
         metrics: MetricsExporter,
         oauth_store: OAuthTokenStore | None = None,
+        mcp_discovery: McpDiscoveryClient | None = None,
     ) -> None:
         self.settings = settings
         self.factory = factory
@@ -91,6 +112,9 @@ class JobProcessor:
         self.telegram = telegram
         self.metrics = metrics
         self.oauth_store = oauth_store or OAuthTokenStore(settings)
+        self.mcp_discovery = mcp_discovery or McpDiscoveryClient(
+            timeout_seconds=settings.oauth_http_timeout_seconds
+        )
 
     def _claim(self, session: Session) -> UpdateJob | None:
         cleanup = session.execute(
@@ -673,6 +697,16 @@ class JobProcessor:
                     "Для MCP требуется корпоративная авторизация. Выполните /login.",
                 )
                 return
+            history.insert(
+                0,
+                {
+                    "role": "developer",
+                    "content": mcp_capability_note(
+                        self.settings,
+                        authorized=bool(mcp_token),
+                    ),
+                },
+            )
             try:
                 result = self.agent.respond(
                     messages=history,
@@ -765,16 +799,21 @@ class JobProcessor:
                     "До подтверждения OpenAI и MCP не вызываются.",
                 )
             elif user.status == AccessStatus.active:
-                self._send_and_finish(session, job, "Доступ активен. Отправьте текстовый запрос.")
+                self._send_and_finish(
+                    session,
+                    job,
+                    "Доступ активен. Отправьте текстовый запрос. "
+                    "Фактический статус интеграций: /mcp_status.",
+                )
             else:
                 self._send_and_finish(session, job, "Доступ отозван. Обратитесь к администратору.")
         elif job.kind == "help":
             self._send_and_finish(
                 session,
                 job,
-                "Команды: /start, /new, /login, /logout, /help. "
+                "Команды: /start, /new, /login, /logout, /mcp_status, /help. "
                 "Для MCP: /mcp <jira|bitrix|ktalk> <запрос>. "
-                "Администратор: /skills, /skill_show, /skill_edit, "
+                "Администратор: /mcp_discover <сервер>, /skills, /skill_show, /skill_edit, "
                 "/skill_cancel, /skill_rollback, /revoke <telegram_id>.",
             )
         elif job.kind == "new":
@@ -789,6 +828,74 @@ class JobProcessor:
             self._start_login(session, job, user)
         elif job.kind == "logout":
             self._logout(session, job)
+        elif job.kind == "mcp_status":
+            try:
+                authorized = bool(
+                    self.oauth_store.access_token(session, job.telegram_user_id)
+                )
+            except (OAuthConfigurationError, OAuthLoginRequired):
+                authorized = False
+            self._send_and_finish(
+                session,
+                job,
+                mcp_capability_note(self.settings, authorized=authorized),
+            )
+        elif job.kind == "mcp_discover":
+            if job.telegram_user_id not in self.settings.admin_ids():
+                self._send_and_finish(session, job, "Команда доступна только администратору.")
+            else:
+                label = (job.payload_text or "").strip().lower()
+                server = next(
+                    (
+                        item
+                        for item in self.settings.mcp_servers()
+                        if item.server_label == label
+                    ),
+                    None,
+                )
+                if server is None:
+                    labels = ", ".join(
+                        item.server_label for item in self.settings.mcp_servers()
+                    )
+                    self._send_and_finish(
+                        session,
+                        job,
+                        f"Формат: /mcp_discover <сервер>. Доступно: {labels}.",
+                    )
+                else:
+                    try:
+                        access_token = self.oauth_store.access_token(
+                            session, job.telegram_user_id
+                        )
+                        if not access_token:
+                            raise OAuthLoginRequired("OAuth login is required")
+                        tools = self.mcp_discovery.list_tools(server, access_token)
+                    except (OAuthConfigurationError, OAuthLoginRequired):
+                        self._send_and_finish(
+                            session,
+                            job,
+                            "Для discovery требуется корпоративная авторизация. "
+                            "Выполните /login.",
+                        )
+                    except (httpx.HTTPError, McpDiscoveryError) as exc:
+                        logger.warning("MCP discovery failed for %s: %s", label, exc)
+                        self._send_and_finish(
+                            session,
+                            job,
+                            f"Не удалось получить каталог tools MCP {label}. "
+                            "Проверьте доступ и состояние сервера.",
+                        )
+                    else:
+                        if tools:
+                            rows = [f"- {item.name}: {item.description}" for item in tools]
+                            text = (
+                                f"MCP {label}: найдено tools — {len(tools)}. "
+                                "Discovery ничего не включает и не вызывает.\n"
+                                + "\n".join(rows)
+                            )
+                        else:
+                            text = f"MCP {label} вернул пустой каталог tools."
+                        self._send_and_finish(session, job, text)
         elif job.kind in {
             "skills",
             "skill_show",
@@ -937,8 +1044,8 @@ class JobProcessor:
                     session,
                     device.telegram_user_id,
                     device.chat_id,
-                    "Keycloak подключён. MCP Jira, Bitrix и KTalk доступны "
-                    "в пределах ваших корпоративных прав.",
+                    "Keycloak подключён. Проверьте фактически разрешённые интеграции "
+                    "командой /mcp_status.",
                 )
                 session.delete(device)
             elif result.state == "pending":
@@ -960,7 +1067,7 @@ def main() -> None:
     configure_logging()
     settings = get_settings()
     engine = make_engine(settings)
-    Base.metadata.create_all(engine)
+    initialize_development_schema(settings, engine)
     factory = make_session_factory(engine)
     processor = JobProcessor(
         settings,

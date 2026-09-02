@@ -9,6 +9,8 @@
 - запрос доступа с Telegram-кнопками «Разрешить» и «Отклонить»;
 - отзыв доступа через `/revoke <telegram_id>` без перезапуска;
 - `/login` и `/logout` через Keycloak Device Flow либо Authorization Code + PKCE;
+- `/mcp_status` с фактическим состоянием OAuth и allowlist;
+- `/mcp_discover <сервер>` для безопасного чтения каталога tools администратором;
 - зашифрованное хранение персональных access/refresh token в БД и автоматический refresh;
 - передача токена текущего пользователя в `authorization` remote MCP tool;
 - единый read-only allowlist tools для Jira, Bitrix и KTalk;
@@ -18,35 +20,33 @@
 - агрегированные tokens/cost/latency/error metrics без полного текста диалога;
 - SQLite для прямого локального запуска и PostgreSQL в Docker.
 
-## Что нужно до первого live MCP-теста
+## MCP в текущей версии
 
-Администратор Keycloak должен выдать public `client_id` без secret. Готовый запрос: [docs/keycloak-admin-request.md](docs/keycloak-admin-request.md).
+Live discovery через персональный Keycloak OAuth выполнен для всех трёх серверов. В [config/mcp_servers.json](config/mcp_servers.json) включены только опубликованные read-only tools: Jira — 11, Bitrix — 13, KTalk — 5. Каталог можно перепроверить без вызова бизнес-операций командой `/mcp_discover jira|bitrix|ktalk` или скриптом `scripts/discover_mcp_tools.py`.
 
-После этого нужны утверждённые read-only tool names. Сейчас в [config/mcp_servers.json](config/mcp_servers.json) заполнен только Jira allowlist; Bitrix и KTalk намеренно отключены пустыми списками до discovery и согласования.
+## Прямой локальный запуск одной командой
 
-## Прямой локальный запуск
-
-Требуются Python 3.11+ и PowerShell. Числовой Telegram ID администратора можно передать параметром; он одновременно включается в пилотный allowlist.
-
-Mock без расходов OpenAI:
+Требуются Python 3.11+ и PowerShell. При первом запуске команда один раз запросит Telegram token, OpenAI key и Telegram ID администратора:
 
 ```powershell
-.\scripts\local-up.ps1 -OwnerTelegramUserId 123456789
+.\scripts\local-start.ps1
 ```
 
-OpenAI, модель по умолчанию `gpt-5.6-luna`:
+На Windows ту же команду можно запустить двойным кликом по `START_BOT.cmd` в корне проекта.
+
+Секреты сохраняются в игнорируемом `data/local-secrets.clixml` через Windows DPAPI и доступны только текущей учётной записи Windows. Все следующие запуски выполняются той же командой без повторного ввода. Для замены ключей:
 
 ```powershell
-.\scripts\local-up.ps1 -OpenAI -OwnerTelegramUserId 123456789
+.\scripts\local-start.ps1 -Configure
 ```
 
-После получения Keycloak client ID:
+Числовой Telegram ID и Keycloak client можно задать сразу параметрами:
 
 ```powershell
-.\scripts\local-up.ps1 -OpenAI -OwnerTelegramUserId 123456789 -KeycloakClientId 'modus-sales-telegram-bot'
+.\scripts\local-start.ps1 -AdminTelegramId 123456789 -KeycloakClientId 'modus-sales-telegram-local'
 ```
 
-Скрипт скрыто запрашивает Telegram token и OpenAI API key. Они действуют только в процессе и не сохраняются. Постоянный локальный `TOKEN_ENCRYPTION_KEY` автоматически создаётся в игнорируемом `data/token-encryption.key`, поэтому OAuth-сессии переживают перезапуск.
+Постоянный локальный `TOKEN_ENCRYPTION_KEY` автоматически создаётся в игнорируемом `data/token-encryption.key`, поэтому OAuth-сессии переживают перезапуск.
 
 ## Локальный запуск в Docker
 
@@ -57,10 +57,10 @@ OpenAI, модель по умолчанию `gpt-5.6-luna`:
 С Keycloak:
 
 ```powershell
-.\scripts\docker-up.ps1 -OpenAI -OwnerTelegramUserId 123456789 -KeycloakClientId 'modus-sales-telegram-bot'
+.\scripts\docker-up.ps1 -OpenAI -OwnerTelegramUserId 123456789 -KeycloakClientId 'modus-sales-telegram-local'
 ```
 
-Скрипт создаёт игнорируемый `.env.docker.local`, генерирует PostgreSQL password, webhook/safety secrets и постоянный Fernet key, затем поднимает PostgreSQL и polling bot. Telegram/OpenAI secrets сохраняются только в игнорируемом локальном env-файле.
+Первый запуск создаёт игнорируемый `.env.docker.local`, запрашивает ключи и генерирует PostgreSQL password, webhook/safety secrets и постоянный Fernet key. Следующий `docker-up.ps1` использует сохранённые значения без вопросов. Для ротации передайте `-Configure -OpenAI`.
 
 Остановка:
 
@@ -75,6 +75,8 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 - `/new` — удалить контекст диалога;
 - `/login` — начать настроенный корпоративный OAuth flow;
 - `/logout` — отозвать и удалить OAuth-токены;
+- `/mcp_status` — показать фактически подключённые серверы и разрешённые tools;
+- `/mcp_discover bitrix` — получить текущий каталог Bitrix tools без их вызова, только администратор;
 - `/mcp jira покажи SH-501` — принудительно вызвать выбранный MCP;
 - `/skills` — выбрать skill, только администратор;
 - `/skill_show`, `/skill_edit`, `/skill_cancel`, `/skill_rollback` — управление выбранным skill;
@@ -118,3 +120,9 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 Проверка устанавливает зависимости, запускает Ruff, тесты критических сценариев, secret scan и HTTP readiness smoke.
 
 Для production-развёртывания используйте [инструкцию DevOps](docs/devops-keycloak-deployment-runbook.md) и [общий deployment runbook](docs/deployment.md). Секреты запрещено хранить в Git, Jira и логах.
+
+На Linux-сервере схема БД накатывается отдельным одноразовым сервисом `migrate` до запуска web/worker. Проверенный входной сценарий:
+
+```bash
+./scripts/server-up.sh /opt/modus-sales-bot/.env.production
+```

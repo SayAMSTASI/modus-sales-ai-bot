@@ -28,10 +28,14 @@ def make_session_factory(engine) -> sessionmaker[Session]:
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 
+def initialize_development_schema(settings: Settings, engine) -> None:
+    if settings.app_env != "production":
+        Base.metadata.create_all(engine)
+
+
 def session_dependency(factory: sessionmaker[Session]):
     def dependency() -> Iterator[Session]:
         with factory() as session:
             yield session
 
     return dependency
-

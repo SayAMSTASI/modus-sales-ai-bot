@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKIP_PARTS = {".git", ".venv", ".pytest_cache", ".ruff_cache", "data", "__pycache__"}
 TEXT_SUFFIXES = {
     ".example",
+    ".cmd",
     ".html",
     ".json",
     ".md",

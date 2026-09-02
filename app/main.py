@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from app.config import Settings, get_settings
-from app.db import Base, make_engine, make_session_factory
+from app.db import initialize_development_schema, make_engine, make_session_factory
 from app.oauth import OAuthTokenStore
 from app.oauth_callback import build_oauth_callback_router
 from app.webhook import build_webhook_router
@@ -16,7 +16,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or get_settings()
     engine = make_engine(settings)
-    Base.metadata.create_all(engine)
+    initialize_development_schema(settings, engine)
     factory = make_session_factory(engine)
     oauth_store = oauth_store or OAuthTokenStore(settings)
 
@@ -36,6 +36,8 @@ def create_app(
     def ready() -> dict[str, str]:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
+            if settings.app_env == "production":
+                connection.execute(text("SELECT version_num FROM alembic_version"))
         return {"status": "ready"}
 
     return application

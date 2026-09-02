@@ -24,8 +24,8 @@ services:
     ports:
       - "${HTTP_BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8000}:8000"
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [
@@ -39,14 +39,21 @@ services:
       retries: 12
     restart: unless-stopped
 
+  migrate:
+    build: .
+    image: ${SALES_BOT_IMAGE:-modus-sales-bot:local}
+    env_file: ${ENV_FILE:-.env.production}
+    command: alembic upgrade head
+    depends_on:
+      db:
+        condition: service_healthy
+
   worker:
     build: .
     image: ${SALES_BOT_IMAGE:-modus-sales-bot:local}
     env_file: ${ENV_FILE:-.env.production}
     command: python -m app.worker
     depends_on:
-      db:
-        condition: service_healthy
       web:
         condition: service_healthy
     restart: unless-stopped

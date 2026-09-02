@@ -7,10 +7,26 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $venv = Join-Path $projectRoot '.venv'
+$savedSecretsPath = Join-Path $projectRoot 'data\local-secrets.clixml'
+$savedSecrets = $null
+
+if (Test-Path -LiteralPath $savedSecretsPath) {
+    $savedSecrets = Import-Clixml -LiteralPath $savedSecretsPath
+}
 
 function Read-Secret([string]$Prompt) {
     $secure = Read-Host $Prompt -AsSecureString
     $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+    }
+}
+
+function Convert-SavedSecret([Security.SecureString]$SecureValue) {
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
     try {
         return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
     }
@@ -29,7 +45,12 @@ if ($LASTEXITCODE -ne 0) {
     & $python -m pip install --disable-pip-version-check -e $projectRoot
 }
 if (-not $env:TELEGRAM_BOT_TOKEN) {
-    $env:TELEGRAM_BOT_TOKEN = Read-Secret 'Telegram bot token from @BotFather'
+    if ($savedSecrets -and $savedSecrets.TelegramBotToken) {
+        $env:TELEGRAM_BOT_TOKEN = Convert-SavedSecret $savedSecrets.TelegramBotToken
+    }
+    else {
+        $env:TELEGRAM_BOT_TOKEN = Read-Secret 'Telegram bot token from @BotFather'
+    }
 }
 if (-not $env:TELEGRAM_BOT_TOKEN) {
     throw 'Telegram bot token is empty.'
@@ -51,6 +72,12 @@ elseif (-not $env:ADMIN_TELEGRAM_IDS -and (Test-Path -LiteralPath $adminIdPath))
     $ownerId = (Get-Content -Raw -LiteralPath $adminIdPath).Trim()
     $env:ADMIN_TELEGRAM_IDS = $ownerId
     $env:PILOT_TELEGRAM_IDS = $ownerId
+}
+elseif (-not $env:ADMIN_TELEGRAM_IDS -and $savedSecrets -and $savedSecrets.AdminTelegramIds) {
+    $ownerId = $savedSecrets.AdminTelegramIds.ToString()
+    $env:ADMIN_TELEGRAM_IDS = $ownerId
+    $env:PILOT_TELEGRAM_IDS = $ownerId
+    Set-Content -LiteralPath $adminIdPath -Value $ownerId -Encoding ascii
 }
 elseif (-not $env:ADMIN_TELEGRAM_IDS) {
     $ownerId = Read-Host 'Your numeric Telegram user ID (pilot administrator)'
@@ -83,12 +110,21 @@ elseif (-not $env:KEYCLOAK_CLIENT_ID) {
     if (Test-Path -LiteralPath $clientIdPath) {
         $env:KEYCLOAK_CLIENT_ID = (Get-Content -Raw -LiteralPath $clientIdPath).Trim()
     }
+    elseif ($savedSecrets -and $savedSecrets.KeycloakClientId) {
+        $env:KEYCLOAK_CLIENT_ID = $savedSecrets.KeycloakClientId.ToString().Trim()
+        Set-Content -LiteralPath $clientIdPath -Value $env:KEYCLOAK_CLIENT_ID -Encoding ascii
+    }
 }
 
 if ($OpenAI) {
     $env:AGENT_BACKEND = 'openai'
     if (-not $env:OPENAI_API_KEY) {
-        $env:OPENAI_API_KEY = Read-Secret 'OpenAI project API key'
+        if ($savedSecrets -and $savedSecrets.OpenAIApiKey) {
+            $env:OPENAI_API_KEY = Convert-SavedSecret $savedSecrets.OpenAIApiKey
+        }
+        else {
+            $env:OPENAI_API_KEY = Read-Secret 'OpenAI project API key'
+        }
     }
     if (-not $env:OPENAI_API_KEY) {
         throw 'OpenAI API key is empty.'
@@ -107,5 +143,6 @@ finally {
     $env:TELEGRAM_BOT_TOKEN = $null
     $env:OPENAI_API_KEY = $null
     $env:TOKEN_ENCRYPTION_KEY = $null
+    $savedSecrets = $null
     Pop-Location
 }

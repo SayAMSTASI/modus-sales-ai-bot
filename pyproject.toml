@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Guarded Telegram pilot for the sales AI agent"
 requires-python = ">=3.11"
 dependencies = [
+  "alembic>=1.16,<2",
   "cryptography>=46,<47",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",

@@ -33,7 +33,7 @@ from app.models import (
 from app.oauth import KeycloakOAuthClient, TokenPollResult, TokenResponse
 from app.skills import active_skill_version
 from app.telegram import InMemoryTelegramClient
-from app.worker import JobProcessor
+from app.worker import JobProcessor, shared_allowed_tools
 from tests.conftest import callback_update, telegram_update
 
 
@@ -146,10 +146,54 @@ def test_second_message_receives_context(runtime, post_update, drain):
     post_update(telegram_update(4, 101, "Уточни ответ"))
     drain()
     assert [item["role"] for item in runtime["agent"].last_messages] == [
+        "developer",
         "user",
         "assistant",
         "user",
     ]
+
+
+def test_mcp_status_reports_authorization_and_configured_allowlists(
+    runtime, post_update, drain
+):
+    approve_user(runtime, post_update, drain)
+    post_update(telegram_update(3, 101, "/mcp_status"))
+    drain()
+    status = runtime["telegram"].messages[-1][1]
+    assert "jira: не подключён" in status
+    assert "bitrix: не подключён" in status
+    assert "ktalk: не подключён" in status
+
+    save_token(runtime)
+    post_update(telegram_update(4, 101, "/mcp_status"))
+    drain()
+    status = runtime["telegram"].messages[-1][1]
+    assert "jira: подключён" in status
+    assert "bitrix: подключён" in status
+    assert "ktalk: подключён" in status
+
+
+def test_agent_receives_factual_mcp_capability_note(runtime, post_update, drain):
+    approve_user(runtime, post_update, drain)
+    post_update(telegram_update(3, 101, "Что умеет Bitrix MCP?"))
+    drain()
+    note = runtime["agent"].last_messages[0]
+    assert note["role"] == "developer"
+    assert "bitrix: не подключён" in note["content"]
+
+
+def test_admin_can_discover_mcp_tools_without_enabling_them(
+    runtime, post_update, drain
+):
+    post_update(telegram_update(1, 900, "/start"))
+    drain()
+    save_token(runtime, user_id=900)
+    post_update(telegram_update(2, 900, "/mcp_discover bitrix"))
+    drain()
+    message = runtime["telegram"].messages[-1][1]
+    assert "найдено tools — 2" in message
+    assert "crm_deal_list" in message
+    assert runtime["mcp_discovery"].calls == [("bitrix", "secret-access")]
 
 
 def test_login_poll_and_logout_store_only_encrypted_tokens(runtime, post_update, drain):
@@ -456,12 +500,36 @@ def test_optional_mcp_failure_retries_plain_openai_request():
 
 
 def test_checked_in_mcp_registry_is_read_only():
-    servers = Settings(app_env="test", mcp_servers_file="config/mcp_servers.json").mcp_servers()
+    settings = Settings(app_env="test", mcp_servers_file="config/mcp_servers.json")
+    servers = settings.mcp_servers()
     assert [server.server_label for server in servers] == ["jira", "bitrix", "ktalk"]
     assert all(server.authorization_type == "oauth" for server in servers)
     assert all(server.read_only is True for server in servers)
     assert servers[0].allowed_tools == [
         "jira_get_issue",
         "jira_search",
-        "jira_get_all_projects",
+        "jira_search_fields",
+        "jira_get_field_options",
+        "jira_get_project_issues",
+        "jira_get_transitions",
+        "jira_get_agile_boards",
+        "jira_get_board_issues",
+        "jira_get_sprints_from_board",
+        "jira_get_sprint_issues",
+        "jira_batch_get_changelogs",
     ]
+    assert len(servers[1].allowed_tools) == 13
+    assert len(servers[2].allowed_tools) == 5
+
+    client = OpenAIAgentClient(
+        Settings(
+            app_env="test",
+            openai_api_key="test-key",
+            mcp_servers_file="config/mcp_servers.json",
+        )
+    )
+    attached = client._tools(
+        shared_allowed_tools(settings),
+        mcp_access_token="current-user-token",
+    )
+    assert [item["server_label"] for item in attached] == ["jira", "bitrix", "ktalk"]

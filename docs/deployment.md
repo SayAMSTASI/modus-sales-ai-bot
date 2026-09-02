@@ -4,7 +4,7 @@
 
 ## Целевой результат
 
-Внутри корпоративного контура работают PostgreSQL, webhook/API и один worker. Внешний TLS reverse proxy принимает Telegram webhook. Секреты передаются отдельно через корпоративное хранилище секретов или закрытый env-файл на сервере и никогда не попадают в Git, Jira, образ или логи.
+Внутри корпоративного контура работают PostgreSQL, одноразовый мигратор, webhook/API и один worker. Внешний TLS reverse proxy принимает Telegram webhook. Секреты передаются отдельно через корпоративное хранилище секретов или закрытый env-файл на сервере и никогда не попадают в Git, Jira, образ или логи.
 
 ## Подготовка инфраструктуры
 
@@ -39,12 +39,11 @@ Access/refresh tokens пользователей хранятся только �
 ## Запуск
 
 ```bash
-export ENV_FILE=/opt/modus-sales-bot/.env.production
-docker compose --env-file "$ENV_FILE" pull
-docker compose --env-file "$ENV_FILE" up -d --build
-docker compose --env-file "$ENV_FILE" ps
-curl --fail http://127.0.0.1:8000/health/ready
+chmod +x scripts/server-up.sh
+./scripts/server-up.sh /opt/modus-sales-bot/.env.production
 ```
+
+Скрипт валидирует Compose, собирает образ, запускает PostgreSQL, выполняет `alembic upgrade head`, поднимает web/worker, проверяет Keycloak metadata, ждёт readiness и регистрирует Telegram webhook. Если DNS/TLS ещё не готовы, перед запуском можно временно задать `REGISTER_TELEGRAM_WEBHOOK=false`.
 
 Reverse proxy направляет `https://<domain>/telegram/webhook` и `https://<domain>/oauth/callback` на web-контейнер. Значение `PUBLIC_BASE_URL` должно быть ровно `https://<domain>`, а Keycloak Valid Redirect URI — ровно `https://<domain>/oauth/callback`. Порт 8000 не публикуется наружу напрямую.
 

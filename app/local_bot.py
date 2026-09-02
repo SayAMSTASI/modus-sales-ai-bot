@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent import build_agent_client
 from app.config import Settings, get_settings
-from app.db import Base, make_engine, make_session_factory
+from app.db import initialize_development_schema, make_engine, make_session_factory
 from app.ingest import ingest_update
 from app.logging_config import configure_logging
 from app.metrics import build_metrics_exporter
@@ -81,7 +81,7 @@ def build_local_runtime(settings: Settings) -> LocalBotRuntime:
         raise RuntimeError("OPENAI_API_KEY is required when AGENT_BACKEND=openai")
 
     engine = make_engine(settings)
-    Base.metadata.create_all(engine)
+    initialize_development_schema(settings, engine)
     factory = make_session_factory(engine)
     telegram = HttpTelegramClient(settings.telegram_bot_token)
     processor = JobProcessor(

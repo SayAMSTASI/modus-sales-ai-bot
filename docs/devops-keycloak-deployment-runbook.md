@@ -8,8 +8,8 @@
 - OAuth callback `https://<домен>/oauth/callback`;
 - public OIDC client Keycloak с Authorization Code + PKCE S256;
 - персональный access/refresh token пользователя для `https://mcp.modusbi.ru`;
-- PostgreSQL, web и worker в Docker Compose;
-- Jira MCP с токеном вошедшего пользователя;
+- PostgreSQL, Alembic migration, web и worker в Docker Compose;
+- Jira, Bitrix и KTalk MCP с токеном вошедшего пользователя и read-only allowlist;
 - `/logout` и отзыв доступа администратором.
 
 Пароли, API keys, bot token, OAuth tokens и ключ шифрования нельзя передавать через Git, Jira, Telegram или обычные сообщения.
@@ -171,13 +171,12 @@ TOKEN_ENCRYPTION_KEY=<fernet-secret>
 В каталоге репозитория:
 
 ```bash
-export ENV_FILE=/opt/modus-sales-bot/.env.production
-
-docker compose --env-file "$ENV_FILE" config --quiet
-docker compose --env-file "$ENV_FILE" build
-docker compose --env-file "$ENV_FILE" up -d
-docker compose --env-file "$ENV_FILE" ps
+chmod +x scripts/server-up.sh
+./scripts/server-up.sh /opt/modus-sales-bot/.env.production
 ```
+
+`migrate` обязан завершиться с кодом 0 до старта web. В production приложение не создаёт таблицы неявно; версия схемы фиксируется в `alembic_version`.
+После readiness скрипт проверяет OAuth metadata и регистрирует Telegram webhook. Для подготовительного запуска без регистрации webhook используйте `REGISTER_TELEGRAM_WEBHOOK=false`.
 
 Проверить health:
 
@@ -234,11 +233,12 @@ docker compose --env-file "$ENV_FILE" run --rm web \
 7. После входа Keycloak возвращает браузер на `/oauth/callback`.
 8. Браузер показывает успешное завершение, бот присылает уведомление.
 9. Повторное открытие callback отклоняется как использованная OAuth-сессия.
-10. Выполнить `/mcp jira покажи SH-501` и получить реальный ответ Jira.
-11. Выполнить `/logout`; следующий `/mcp jira ...` снова требует `/login`.
-12. Администратор отзывает доступ; новые OpenAI/MCP-вызовы блокируются без перезапуска.
-
-После утверждения read-only tools повторить smoke для Bitrix и KTalk. Если KTalk не принимает общий Keycloak token, зафиксировать его отдельный auth-контракт до изменения приложения.
+10. Выполнить `/mcp_status`: Jira, Bitrix и KTalk должны отображаться подключёнными.
+11. Выполнить `/mcp jira покажи SH-501` и получить реальный ответ Jira.
+12. Выполнить `/mcp bitrix покажи мой профиль Bitrix` и получить реальный профиль.
+13. Выполнить `/mcp ktalk покажи последние записи` и получить результат либо зафиксированную ошибку upstream KTalk.
+14. Выполнить `/logout`; следующий `/mcp jira ...` снова требует `/login`.
+15. Администратор отзывает доступ; новые OpenAI/MCP-вызовы блокируются без перезапуска.
 
 ## 10. Проверка логов и секретов
 
