@@ -8,7 +8,7 @@ COPY pyproject.toml README.md alembic.ini ./
 COPY app ./app
 COPY config ./config
 COPY migrations ./migrations
-COPY scripts/check_keycloak_config.py scripts/register_webhook.py scripts/discover_mcp_tools.py ./scripts/
+COPY scripts/check_keycloak_config.py scripts/register_webhook.py scripts/discover_mcp_tools.py scripts/import_sqlite_to_postgres.py ./scripts/
 RUN pip install --no-cache-dir .
 
 RUN addgroup --system app && adduser --system --ingroup app app \

@@ -12,3 +12,4 @@ data/
 *.sqlite3
 service-account*.json
 secrets/
+delivery/
