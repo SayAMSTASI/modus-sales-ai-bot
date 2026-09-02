@@ -70,6 +70,8 @@ def test_initial_migration_upgrades_a_new_database(tmp_path, monkeypatch):
         "pending_conversation_feedback",
         "conversation_feedback",
     }.issubset(inspector.get_table_names())
+    update_columns = {item["name"] for item in inspector.get_columns("update_jobs")}
+    assert "response_attachments_encrypted" in update_columns
 
 
 def test_feedback_migration_accepts_tables_precreated_by_development_schema(
@@ -98,7 +100,7 @@ def test_feedback_migration_accepts_tables_precreated_by_development_schema(
     command.upgrade(config, "head")
     with engine.connect() as connection:
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == (
-            "20260902_02"
+            "20260902_03"
         )
 
 
@@ -106,3 +108,10 @@ def test_webhook_registration_includes_admin_callbacks():
     script = (ROOT / "scripts" / "register_webhook.py").read_text(encoding="utf-8")
     assert '"allowed_updates": ["message", "callback_query"]' in script
     assert "setMyCommands" in script
+
+
+def test_local_start_applies_database_migrations_before_bot():
+    script = (ROOT / "scripts" / "local-up.ps1").read_text(encoding="utf-8")
+    migration = script.index("-m alembic upgrade head")
+    launch = script.index("-m app.local_bot")
+    assert migration < launch

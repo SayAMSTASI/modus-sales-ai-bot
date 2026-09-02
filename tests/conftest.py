@@ -152,6 +152,59 @@ def telegram_update(
     return {"update_id": update_id, "message": message}
 
 
+def telegram_document_update(
+    update_id: int,
+    user_id: int,
+    *,
+    file_id: str,
+    filename: str,
+    mime_type: str,
+    size_bytes: int,
+    caption: str | None = None,
+) -> dict:
+    message = telegram_update(update_id, user_id, None)["message"]
+    message["document"] = {
+        "file_id": file_id,
+        "file_unique_id": f"unique-{file_id}",
+        "file_name": filename,
+        "mime_type": mime_type,
+        "file_size": size_bytes,
+    }
+    if caption is not None:
+        message["caption"] = caption
+    return {"update_id": update_id, "message": message}
+
+
+def telegram_photo_update(
+    update_id: int,
+    user_id: int,
+    *,
+    file_id: str,
+    size_bytes: int,
+    caption: str | None = None,
+) -> dict:
+    message = telegram_update(update_id, user_id, None)["message"]
+    message["photo"] = [
+        {
+            "file_id": f"{file_id}-small",
+            "file_unique_id": f"unique-{file_id}-small",
+            "width": 90,
+            "height": 90,
+            "file_size": max(size_bytes // 4, 1),
+        },
+        {
+            "file_id": file_id,
+            "file_unique_id": f"unique-{file_id}",
+            "width": 1024,
+            "height": 768,
+            "file_size": size_bytes,
+        },
+    ]
+    if caption is not None:
+        message["caption"] = caption
+    return {"update_id": update_id, "message": message}
+
+
 def callback_update(update_id: int, user_id: int, data: str) -> dict:
     return {
         "update_id": update_id,

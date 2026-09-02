@@ -72,6 +72,7 @@ class UpdateJob(Base):
     kind: Mapped[str] = mapped_column(String(32), default="message")
     payload_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_attachments_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=JobStatus.queued, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     available_at: Mapped[datetime] = mapped_column(

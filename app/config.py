@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     openai_prompt_version: str = ""
     openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "low"
     openai_max_output_tokens: int = 1200
+    openai_enable_image_generation: bool = True
     openai_input_usd_per_mtok: float = 2.0
     openai_cached_input_usd_per_mtok: float = 0.2
     openai_output_usd_per_mtok: float = 12.0
@@ -78,6 +79,18 @@ class Settings(BaseSettings):
     question_audit_retention_days: int = 30
     question_audit_max_chars: int = 4000
     admin_users_page_size: int = 10
+
+    attachment_max_input_bytes: int = 10 * 1024 * 1024
+    attachment_max_output_bytes: int = 10 * 1024 * 1024
+    attachment_max_output_count: int = 4
+    attachment_http_timeout_seconds: float = 30.0
+    attachment_allowed_mime_types: str = (
+        "image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown,text/csv,"
+        "application/json,application/vnd.openxmlformats-officedocument.wordprocessingml.document,"
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+    attachment_download_allowed_hosts: str = ""
 
     mcp_servers_json: str = ""
     mcp_servers_file: Path = Path("config/mcp_servers.json")
@@ -133,6 +146,28 @@ class Settings(BaseSettings):
         result = self._parse_id_list(self.pilot_telegram_ids)
         if self.local_owner_telegram_user_id is not None:
             result.add(self.local_owner_telegram_user_id)
+        return result
+
+    def allowed_attachment_mime_types(self) -> set[str]:
+        return {
+            item.strip().lower()
+            for item in self.attachment_allowed_mime_types.split(",")
+            if item.strip()
+        }
+
+    def attachment_download_hosts(self) -> set[str]:
+        from urllib.parse import urlparse
+
+        result = {
+            item.strip().lower()
+            for item in self.attachment_download_allowed_hosts.split(",")
+            if item.strip()
+        }
+        result.update(
+            (urlparse(server.server_url).hostname or "").lower()
+            for server in self.mcp_servers()
+        )
+        result.discard("")
         return result
 
     @property

@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from app.attachments import AgentAttachment, AttachmentError
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,15 @@ class TelegramClient(Protocol):
 
     def set_commands(self, commands: list[dict[str, str]]) -> None: ...
 
+    def download_file(self, file_id: str, *, max_bytes: int) -> bytes: ...
+
+    def send_attachment(
+        self,
+        chat_id: int,
+        attachment: AgentAttachment,
+        caption: str | None = None,
+    ) -> None: ...
+
 
 class PollingTelegramClient(TelegramClient, Protocol):
     def get_me(self) -> dict[str, Any]: ...
@@ -128,6 +138,7 @@ class PollingTelegramClient(TelegramClient, Protocol):
 class HttpTelegramClient:
     def __init__(self, token: str) -> None:
         self._base_url = f"https://api.telegram.org/bot{token}"
+        self._file_base_url = f"https://api.telegram.org/file/bot{token}"
 
     def _post(
         self,
@@ -138,6 +149,27 @@ class HttpTelegramClient:
     ) -> Any:
         with httpx.Client(timeout=timeout) as client:
             response = client.post(f"{self._base_url}/{method}", json=payload)
+            response.raise_for_status()
+            body = response.json()
+        if not body.get("ok"):
+            description = body.get("description", "unknown")
+            raise RuntimeError(f"Telegram API {method} failed: {description}")
+        return body.get("result")
+
+    def _post_multipart(
+        self,
+        method: str,
+        payload: dict[str, str],
+        files: dict[str, tuple[str, bytes, str]],
+        *,
+        timeout: float = 60,
+    ) -> Any:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(
+                f"{self._base_url}/{method}",
+                data=payload,
+                files=files,
+            )
             response.raise_for_status()
             body = response.json()
         if not body.get("ok"):
@@ -171,6 +203,54 @@ class HttpTelegramClient:
 
     def set_commands(self, commands: list[dict[str, str]]) -> None:
         self._post("setMyCommands", {"commands": commands})
+
+    def download_file(self, file_id: str, *, max_bytes: int) -> bytes:
+        result = self._post("getFile", {"file_id": file_id})
+        if not isinstance(result, dict) or not isinstance(result.get("file_path"), str):
+            raise AttachmentError("Telegram getFile returned no file path")
+        declared = max(int(result.get("file_size") or 0), 0)
+        if declared > max_bytes:
+            raise AttachmentError("Telegram file exceeds the configured input limit")
+        chunks: list[bytes] = []
+        total = 0
+        with httpx.stream(
+            "GET",
+            f"{self._file_base_url}/{result['file_path'].lstrip('/')}",
+            timeout=60,
+            follow_redirects=False,
+        ) as response:
+            response.raise_for_status()
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if total > max_bytes:
+                    raise AttachmentError("Telegram file exceeds the configured input limit")
+                chunks.append(chunk)
+        return b"".join(chunks)
+
+    def send_attachment(
+        self,
+        chat_id: int,
+        attachment: AgentAttachment,
+        caption: str | None = None,
+    ) -> None:
+        if attachment.data is None:
+            raise AttachmentError("Outbound Telegram attachment has no data")
+        is_photo = attachment.kind == "photo" and attachment.mime_type in {
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+        }
+        field = "photo" if is_photo else "document"
+        method = "sendPhoto" if is_photo else "sendDocument"
+        payload = {"chat_id": str(chat_id)}
+        if caption:
+            payload["caption"] = render_telegram_html(caption)[:1000]
+            payload["parse_mode"] = "HTML"
+        self._post_multipart(
+            method,
+            payload,
+            {field: (attachment.filename, attachment.data, attachment.mime_type)},
+        )
 
     def get_me(self) -> dict[str, Any]:
         result = self._post("getMe", {})
@@ -209,6 +289,22 @@ class LoggingTelegramClient:
     def set_commands(self, commands: list[dict[str, str]]) -> None:
         logger.info("Mock Telegram commands configured count=%s", len(commands))
 
+    def download_file(self, file_id: str, *, max_bytes: int) -> bytes:
+        raise AttachmentError("Telegram file download is unavailable without a bot token")
+
+    def send_attachment(
+        self,
+        chat_id: int,
+        attachment: AgentAttachment,
+        caption: str | None = None,
+    ) -> None:
+        logger.info(
+            "Mock Telegram attachment delivery chat_id=%s name=%s bytes=%s",
+            chat_id,
+            attachment.filename,
+            len(attachment.data or b""),
+        )
+
 
 @dataclass
 class InMemoryTelegramClient:
@@ -216,6 +312,8 @@ class InMemoryTelegramClient:
     markups: list[dict[str, Any] | None] = field(default_factory=list)
     callback_answers: list[tuple[str, str]] = field(default_factory=list)
     commands: list[dict[str, str]] = field(default_factory=list)
+    files: dict[str, bytes] = field(default_factory=dict)
+    attachments: list[tuple[int, AgentAttachment, str | None]] = field(default_factory=list)
 
     def send_message(
         self,
@@ -231,6 +329,22 @@ class InMemoryTelegramClient:
 
     def set_commands(self, commands: list[dict[str, str]]) -> None:
         self.commands = commands
+
+    def download_file(self, file_id: str, *, max_bytes: int) -> bytes:
+        if file_id not in self.files:
+            raise AttachmentError("Test Telegram file is not registered")
+        data = self.files[file_id]
+        if len(data) > max_bytes:
+            raise AttachmentError("Test Telegram file exceeds the configured input limit")
+        return data
+
+    def send_attachment(
+        self,
+        chat_id: int,
+        attachment: AgentAttachment,
+        caption: str | None = None,
+    ) -> None:
+        self.attachments.append((chat_id, attachment, caption))
 
 
 def build_telegram_client(settings: Settings) -> TelegramClient:

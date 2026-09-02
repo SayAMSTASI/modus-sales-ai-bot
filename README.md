@@ -27,6 +27,11 @@
 - журнал вопросов с автором, временем и результатом обработки (по умолчанию 30 дней),
   без копирования ответов агента;
 - агрегированные tokens/cost/latency/error metrics и статистика удовлетворённости;
+- двусторонние вложения: PDF, TXT, CSV, JSON, DOCX, XLSX, PPTX, JPEG, PNG и WebP
+  принимаются из Telegram; изображения OpenAI и файловые результаты MCP возвращаются
+  пользователю как Telegram-фото или документы;
+- проверка MIME/размера, allowlist хостов скачивания и шифрование исходящих файлов,
+  временно сохранённых в очереди для повторной доставки;
 - SQLite для прямого локального запуска и PostgreSQL в Docker.
 
 ## MCP в текущей версии
@@ -121,6 +126,10 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 - `QUESTION_AUDIT_RETENTION_DAYS=30` — срок хранения текста вопросов;
 - `QUESTION_AUDIT_MAX_CHARS=4000` — максимальная длина записи вопроса;
 - `ADMIN_USERS_PAGE_SIZE=10` — число пользователей в одном списке Telegram.
+- `ATTACHMENT_MAX_INPUT_BYTES`, `ATTACHMENT_MAX_OUTPUT_BYTES` — предельный размер файла;
+- `ATTACHMENT_ALLOWED_MIME_TYPES` — разрешённые форматы;
+- `ATTACHMENT_DOWNLOAD_ALLOWED_HOSTS` — дополнительные HTTPS-хосты для ссылок MCP;
+- `OPENAI_ENABLE_IMAGE_GENERATION=true` — разрешить встроенный инструмент создания изображений.
 
 Все три MCP получают персональный Keycloak token текущего Telegram-пользователя. Статические MCP-токены из environment больше не используются.
 

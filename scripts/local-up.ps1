@@ -138,6 +138,10 @@ else {
 
 Push-Location $projectRoot
 try {
+    & $python -m alembic upgrade head
+    if ($LASTEXITCODE -ne 0) {
+        throw "Database migration failed with exit code $LASTEXITCODE"
+    }
     & $python -m app.local_bot
 }
 finally {

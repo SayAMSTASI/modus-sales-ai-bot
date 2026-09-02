@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.attachments import encode_telegram_attachment, telegram_attachment_from_message
 from app.config import Settings
 from app.models import AccessStatus, UpdateJob, UserAccess
 from app.policy import check_limits
@@ -33,7 +34,9 @@ def _request_number(user_id: int) -> str:
     return f"P-{today}-{str(user_id)[-6:]}-{secrets.token_hex(2).upper()}"
 
 
-def extract_update(update: dict[str, Any]) -> tuple[int, int, int, str, str | None] | None:
+def extract_update(
+    update: dict[str, Any],
+) -> tuple[int, int, int, str, str | None, dict[str, Any]] | None:
     update_id = update.get("update_id")
     message = update.get("message")
     if not isinstance(update_id, int) or not isinstance(message, dict):
@@ -45,7 +48,10 @@ def extract_update(update: dict[str, Any]) -> tuple[int, int, int, str, str | No
     chat_type = chat.get("type")
     if not isinstance(user_id, int) or not isinstance(chat_id, int):
         return None
-    return update_id, user_id, chat_id, str(chat_type), message.get("text")
+    text = message.get("text")
+    if not isinstance(text, str):
+        text = message.get("caption")
+    return update_id, user_id, chat_id, str(chat_type), text, message
 
 
 def extract_callback(update: dict[str, Any]) -> tuple[int, int, int, str, str] | None:
@@ -133,7 +139,7 @@ def ingest_update(
         return {"ok": True, "accepted": True}
     if parsed is None:
         return {"ok": True, "accepted": False, "reason": "unsupported_update"}
-    update_id, user_id, chat_id, chat_type, text = parsed
+    update_id, user_id, chat_id, chat_type, text, message = parsed
     if chat_type != "private" or user_id != chat_id:
         return {"ok": True, "accepted": False, "reason": "private_chat_required"}
 
@@ -144,6 +150,7 @@ def ingest_update(
         user = session.scalar(select(UserAccess).where(UserAccess.telegram_user_id == user_id))
         sender = update.get("message", {}).get("from") or {}
         username = str(sender.get("username") or "") or None
+        attachment = telegram_attachment_from_message(message)
         normalized_text = text.strip() if isinstance(text, str) else ""
         menu_command = MENU_ACTIONS.get(normalized_text, "")
         command = menu_command or (
@@ -250,12 +257,6 @@ def ingest_update(
             kind = command[1:]
             command_parts = normalized_text.split(maxsplit=1)
             payload = command_parts[1] if len(command_parts) == 2 else ""
-        elif text is None:
-            kind = "unsupported"
-            payload = None
-        elif len(text) > settings.max_message_chars:
-            kind = "too_long"
-            payload = None
         elif (
             user is None
             or user.status != AccessStatus.active
@@ -268,6 +269,18 @@ def ingest_update(
             if limit_reason:
                 kind = "limit_denied"
                 payload = limit_reason
+            elif attachment and attachment.size_bytes > settings.attachment_max_input_bytes:
+                kind = "attachment_too_large"
+                payload = attachment.filename
+            elif (
+                attachment
+                and attachment.mime_type not in settings.allowed_attachment_mime_types()
+            ):
+                kind = "unsupported_attachment"
+                payload = attachment.mime_type
+            elif isinstance(text, str) and len(text) > settings.max_message_chars:
+                kind = "too_long"
+                payload = None
             elif command == "/mcp":
                 parts = text.split(maxsplit=2)
                 if len(parts) < 3:
@@ -279,6 +292,12 @@ def ingest_update(
                         {"server": parts[1].lower(), "query": parts[2]},
                         ensure_ascii=False,
                     )
+            elif attachment:
+                kind = "message"
+                payload = encode_telegram_attachment(attachment, normalized_text)
+            elif text is None:
+                kind = "unsupported"
+                payload = None
         session.add(
             UpdateJob(
                 update_id=update_id,

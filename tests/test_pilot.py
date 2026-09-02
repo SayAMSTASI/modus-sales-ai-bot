@@ -16,6 +16,7 @@ from app.agent import (
     calculate_cost_usd,
     load_project_instructions,
 )
+from app.attachments import AgentAttachment, extract_response_attachments
 from app.config import Settings
 from app.local_bot import LocalBotRuntime
 from app.logging_config import configure_logging
@@ -37,7 +38,12 @@ from app.oauth import KeycloakOAuthClient, TokenPollResult, TokenResponse
 from app.skills import active_skill_version
 from app.telegram import HttpTelegramClient, InMemoryTelegramClient, render_telegram_html
 from app.worker import JobProcessor, shared_allowed_tools
-from tests.conftest import callback_update, telegram_update
+from tests.conftest import (
+    callback_update,
+    telegram_document_update,
+    telegram_photo_update,
+    telegram_update,
+)
 
 
 def test_local_logging_does_not_expose_http_request_urls():
@@ -130,6 +136,186 @@ def test_approved_flow_records_context_and_aggregate_metrics(runtime, post_updat
         assert event.input_tokens > 0
         assert event.estimated_cost_usd > 0
         assert session.scalar(select(func.count(ConversationMessage.id))) == 2
+
+
+def test_incoming_pdf_is_downloaded_and_sent_to_responses_input(
+    runtime, post_update, drain
+):
+    approve_user(runtime, post_update, drain)
+    runtime["telegram"].files["pdf-file"] = b"%PDF-1.4 test"
+    response = post_update(
+        telegram_document_update(
+            3,
+            101,
+            file_id="pdf-file",
+            filename="brief.pdf",
+            mime_type="application/pdf",
+            size_bytes=13,
+            caption="Сделай краткое резюме",
+        )
+    )
+    assert response.json()["accepted"] is True
+    drain()
+
+    user_message = next(
+        item for item in reversed(runtime["agent"].last_messages) if item["role"] == "user"
+    )
+    assert user_message["content"][0]["type"] == "input_file"
+    assert user_message["content"][0]["filename"] == "brief.pdf"
+    assert user_message["content"][0]["file_data"].startswith(
+        "data:application/pdf;base64,"
+    )
+    assert user_message["content"][1] == {
+        "type": "input_text",
+        "text": "Сделай краткое резюме",
+    }
+
+
+def test_incoming_photo_uses_largest_variant_and_image_input(
+    runtime, post_update, drain
+):
+    approve_user(runtime, post_update, drain)
+    runtime["telegram"].files["photo-large"] = b"jpeg-bytes"
+    post_update(
+        telegram_photo_update(
+            3,
+            101,
+            file_id="photo-large",
+            size_bytes=10,
+            caption="Что изображено?",
+        )
+    )
+    drain()
+
+    user_message = next(
+        item for item in reversed(runtime["agent"].last_messages) if item["role"] == "user"
+    )
+    assert user_message["content"][0]["type"] == "input_image"
+    assert user_message["content"][0]["image_url"].startswith("data:image/jpeg;base64,")
+    assert user_message["content"][1]["text"] == "Что изображено?"
+
+
+def test_oversized_attachment_is_rejected_before_download_or_openai(
+    runtime, post_update, drain
+):
+    approve_user(runtime, post_update, drain)
+    calls_before = runtime["agent"].calls
+    post_update(
+        telegram_document_update(
+            3,
+            101,
+            file_id="too-large",
+            filename="large.pdf",
+            mime_type="application/pdf",
+            size_bytes=runtime["settings"].attachment_max_input_bytes + 1,
+        )
+    )
+    drain()
+    assert runtime["agent"].calls == calls_before
+    assert "слишком большой" in runtime["telegram"].messages[-1][1]
+
+
+def test_agent_attachment_is_encrypted_for_retry_and_sent_to_telegram(
+    runtime, post_update, drain
+):
+    approve_user(runtime, post_update, drain)
+    runtime["agent"].next_attachments = (
+        AgentAttachment(
+            filename="result.csv",
+            mime_type="text/csv",
+            kind="document",
+            data=b"name,value\\nA,1\\n",
+        ),
+    )
+    post_update(telegram_update(3, 101, "Верни результат файлом"))
+    drain()
+
+    assert len(runtime["telegram"].attachments) == 1
+    chat_id, attachment, caption = runtime["telegram"].attachments[0]
+    assert chat_id == 101
+    assert attachment.filename == "result.csv"
+    assert attachment.data == b"name,value\\nA,1\\n"
+    assert caption is None
+    with runtime["factory"]() as session:
+        job = session.scalar(select(UpdateJob).where(UpdateJob.update_id == 3))
+        assert job.response_attachments_encrypted is None
+
+
+def test_outbound_attachment_survives_a_delivery_retry(
+    runtime, post_update, drain
+):
+    approve_user(runtime, post_update, drain)
+    runtime["settings"].max_job_attempts = 2
+    runtime["agent"].next_attachments = (
+        AgentAttachment(
+            filename="retry.txt",
+            mime_type="text/plain",
+            kind="document",
+            data=b"retry-payload",
+        ),
+    )
+    original_send = runtime["telegram"].send_attachment
+
+    def fail_once(*args, **kwargs):
+        raise RuntimeError("temporary Telegram failure")
+
+    runtime["telegram"].send_attachment = fail_once
+    post_update(telegram_update(3, 101, "Подготовь файл"))
+    drain()
+    calls_after_generation = runtime["agent"].calls
+    with runtime["factory"]() as session:
+        job = session.scalar(select(UpdateJob).where(UpdateJob.update_id == 3))
+        assert job.status == "queued"
+        assert job.response_attachments_encrypted
+        assert "retry-payload" not in job.response_attachments_encrypted
+        job.available_at = datetime.now(UTC)
+        session.commit()
+
+    runtime["telegram"].send_attachment = original_send
+    drain()
+    assert runtime["agent"].calls == calls_after_generation
+    assert runtime["telegram"].attachments[-1][1].data == b"retry-payload"
+    with runtime["factory"]() as session:
+        job = session.scalar(select(UpdateJob).where(UpdateJob.update_id == 3))
+        assert job.status == "done"
+        assert job.response_attachments_encrypted is None
+
+
+def test_openai_and_mcp_inline_outputs_are_extracted_as_attachments():
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="image_generation_call",
+                id="img-1",
+                result="aW1hZ2U=",
+            ),
+            SimpleNamespace(
+                type="mcp_call",
+                server_label="ktalk",
+                output=json.dumps(
+                    {
+                        "content": [
+                            {
+                                "type": "resource",
+                                "resource": {
+                                    "name": "transcript.txt",
+                                    "mimeType": "text/plain",
+                                    "blob": "0YLQtdC60YHRgg==",
+                                },
+                            }
+                        ]
+                    }
+                ),
+            ),
+        ]
+    )
+    attachments = extract_response_attachments(response, max_count=4, max_bytes=1024)
+    assert [(item.filename, item.mime_type) for item in attachments] == [
+        ("generated-img-1.png", "image/png"),
+        ("transcript.txt", "text/plain"),
+    ]
+    assert attachments[0].data == b"image"
+    assert attachments[1].source_server == "ktalk"
 
 
 def test_new_requires_feedback_and_clears_context_after_rating(
@@ -582,6 +768,24 @@ def test_telegram_renderer_hides_markdown_headings_and_uses_html():
     assert payloads[0][1]["parse_mode"] == "HTML"
     assert payloads[0][1]["text"].startswith("<b>◆ Заголовок</b>")
 
+    multipart = []
+    client._post_multipart = (  # type: ignore[method-assign]
+        lambda method, payload, files, **kwargs: multipart.append((method, payload, files))
+    )
+    client.send_attachment(
+        101,
+        AgentAttachment(
+            filename="chart.png",
+            mime_type="image/png",
+            kind="photo",
+            data=b"png",
+        ),
+        "Готово",
+    )
+    assert multipart[0][0] == "sendPhoto"
+    assert multipart[0][1]["caption"] == "Готово"
+    assert multipart[0][2]["photo"] == ("chart.png", b"png", "image/png")
+
 
 def test_dynamic_admin_can_be_added_and_removed_without_restart(
     runtime, post_update, drain
@@ -832,4 +1036,6 @@ def test_checked_in_mcp_registry_is_read_only():
         shared_allowed_tools(settings),
         mcp_access_token="current-user-token",
     )
-    assert [item["server_label"] for item in attached] == ["jira", "bitrix", "ktalk"]
+    mcp_tools = [item for item in attached if item["type"] == "mcp"]
+    assert [item["server_label"] for item in mcp_tools] == ["jira", "bitrix", "ktalk"]
+    assert attached[-1] == {"type": "image_generation"}

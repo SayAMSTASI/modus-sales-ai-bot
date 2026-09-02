@@ -13,6 +13,14 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent import AgentClient, McpUnavailableError, build_agent_client, calculate_cost_usd
+from app.attachments import (
+    AttachmentError,
+    decode_message_payload,
+    decrypt_attachments,
+    encrypt_attachments,
+    materialize_attachment,
+    openai_user_message,
+)
 from app.config import Settings, get_settings
 from app.db import initialize_development_schema, make_engine, make_session_factory
 from app.logging_config import configure_logging
@@ -216,6 +224,7 @@ def help_text(*, admin: bool) -> str:
         "• Общается в обычном диалоге и помнит контекст.\n"
         "• Применяет общий набор sales skills.\n"
         "• Читает задачи Jira, данные CRM Bitrix и записи KTalk через MCP.\n"
+        "• Принимает изображения и документы и может вернуть файлы из OpenAI/MCP.\n"
         "• Работает только с вашими корпоративными правами после входа.\n\n"
         "Администраторы видят автора, время и текст вопросов в журнале активности. "
         "Ответы агента и OAuth-токены в этот журнал не копируются.\n\n"
@@ -298,6 +307,7 @@ class JobProcessor:
         job.status = JobStatus.done
         job.payload_text = None
         job.response_text = None
+        job.response_attachments_encrypted = None
         job.error_code = None
         job.finished_at = datetime.now(UTC)
         session.commit()
@@ -1837,6 +1847,15 @@ class JobProcessor:
                 "Запрос не обработан. Доступ к пилоту не подтверждён или отозван.",
             )
             return
+        payload_message_text, telegram_attachment = decode_message_payload(job.payload_text)
+        effective_text = message_text if message_text is not None else payload_message_text
+        audit_text = effective_text
+        if telegram_attachment:
+            attachment_note = (
+                f"[Вложение: {telegram_attachment.filename}; "
+                f"{telegram_attachment.mime_type}; {telegram_attachment.size_bytes} байт]"
+            )
+            audit_text = f"{effective_text}\n{attachment_note}".strip()
         if job.response_text is None:
             pending_feedback = session.scalar(
                 select(PendingConversationFeedback).where(
@@ -1853,9 +1872,6 @@ class JobProcessor:
                     self._feedback_markup(),
                 )
                 return
-            message_text = (
-                message_text if message_text is not None else (job.payload_text or "")
-            )
             question_audit = session.scalar(
                 select(UserQuestionAudit).where(
                     UserQuestionAudit.update_job_id == job.id
@@ -1866,10 +1882,10 @@ class JobProcessor:
                     update_job_id=job.id,
                     telegram_user_id=job.telegram_user_id,
                     chat_id=job.chat_id,
-                    question_text=message_text[
+                    question_text=audit_text[
                         : max(1, self.settings.question_audit_max_chars)
                     ],
-                    scenario=classify_scenario(message_text),
+                    scenario=classify_scenario(effective_text),
                     mcp_server=required_mcp_server,
                     result="processing",
                 )
@@ -1886,7 +1902,27 @@ class JobProcessor:
                 )
                 return
             history = self._load_context(session, job)
-            history.append({"role": "user", "content": message_text})
+            if telegram_attachment:
+                try:
+                    attachment_data = self.telegram.download_file(
+                        telegram_attachment.file_id,
+                        max_bytes=self.settings.attachment_max_input_bytes,
+                    )
+                except AttachmentError:
+                    question_audit.result = "attachment_error"
+                    session.commit()
+                    self._send_and_finish(
+                        session,
+                        job,
+                        "Не удалось безопасно получить вложение из Telegram. "
+                        "Проверьте формат и размер файла и отправьте его повторно.",
+                    )
+                    return
+                history.append(
+                    openai_user_message(effective_text, telegram_attachment, attachment_data)
+                )
+            else:
+                history.append({"role": "user", "content": effective_text})
             user_hash = stable_user_hash(
                 job.telegram_user_id,
                 self.settings.safety_identifier_secret,
@@ -1938,7 +1974,7 @@ class JobProcessor:
             event = UsageEvent(
                 user_hash=user_hash,
                 request_id=result.request_id,
-                scenario=classify_scenario(message_text),
+                scenario=classify_scenario(effective_text),
                 result="ok",
                 duration_ms=result.duration_ms,
                 model=result.model,
@@ -1950,7 +1986,36 @@ class JobProcessor:
             session.add(event)
             question_audit.result = "ok"
             question_audit.request_id = result.request_id
-            job.response_text = result.text
+            materialized = []
+            failed_attachments = 0
+            for attachment in result.attachments:
+                try:
+                    materialized.append(
+                        materialize_attachment(
+                            attachment,
+                            self.settings,
+                            access_token=mcp_token,
+                        )
+                    )
+                except (AttachmentError, httpx.HTTPError):
+                    failed_attachments += 1
+                    logger.warning(
+                        "Outbound attachment skipped name=%s server=%s",
+                        attachment.filename,
+                        attachment.source_server or "openai",
+                    )
+            response_text = result.text or ("Готово." if materialized else "Ответ не сформирован.")
+            if failed_attachments:
+                response_text += (
+                    "\n\nНе удалось безопасно получить часть вложений. "
+                    "Текстовая часть ответа сохранена."
+                )
+            job.response_text = response_text
+            if materialized:
+                job.response_attachments_encrypted = encrypt_attachments(
+                    materialized,
+                    self.settings.token_encryption_key,
+                )
             session.commit()
             try:
                 self.metrics.export(event)
@@ -1958,8 +2023,15 @@ class JobProcessor:
                 logger.exception("Metrics export failed event_id=%s", event.id)
 
         response_text = job.response_text or "Ответ не сформирован."
-        original_text = message_text if message_text is not None else (job.payload_text or "")
+        original_text = audit_text
         self._send(job.chat_id, response_text)
+        for attachment in decrypt_attachments(
+            job.response_attachments_encrypted,
+            self.settings.token_encryption_key,
+            max_count=self.settings.attachment_max_output_count,
+            max_bytes=self.settings.attachment_max_output_bytes,
+        ):
+            self.telegram.send_attachment(job.chat_id, attachment)
         expires = datetime.now(UTC) + timedelta(hours=self.settings.context_ttl_hours)
         session.add_all(
             [
@@ -2018,6 +2090,7 @@ class JobProcessor:
                     job,
                     "# Sales AI готов к работе\n\n"
                     "Напишите задачу обычным текстом или выберите действие ниже. "
+                    "Можно прикреплять изображения и документы. "
                     "Для Jira, Bitrix и KTalk сначала нужна корпоративная авторизация.\n\n"
                     "Администраторы пилота видят автора, время и текст вопросов; "
                     "ответы агента в журнал не копируются.",
@@ -2224,7 +2297,21 @@ class JobProcessor:
             self._send_and_finish(
                 session,
                 job,
-                "В пилоте поддерживаются только текстовые сообщения.",
+                "Поддерживаются текст, изображения и разрешённые документы.",
+            )
+        elif job.kind == "attachment_too_large":
+            self._send_and_finish(
+                session,
+                job,
+                "Файл слишком большой. Максимальный размер входящего вложения: "
+                f"{self.settings.attachment_max_input_bytes // (1024 * 1024)} МБ.",
+            )
+        elif job.kind == "unsupported_attachment":
+            self._send_and_finish(
+                session,
+                job,
+                "Этот формат вложения пока не поддерживается. Отправьте PDF, TXT, "
+                "CSV, JSON, DOCX, XLSX, PPTX, JPEG, PNG или WebP.",
             )
         elif job.kind == "too_long":
             self._send_and_finish(session, job, "Сообщение слишком длинное для пилота.")
@@ -2266,6 +2353,7 @@ class JobProcessor:
                     job.status = JobStatus.failed
                     job.payload_text = None
                     job.response_text = None
+                    job.response_attachments_encrypted = None
                     job.finished_at = datetime.now(UTC)
                 else:
                     job.status = JobStatus.queued

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from openai import OpenAI
 
+from app.attachments import AgentAttachment, extract_response_attachments
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ class AgentResult:
     model: str
     duration_ms: int
     usage: AgentUsage
+    attachments: tuple[AgentAttachment, ...] = ()
 
 
 class McpUnavailableError(RuntimeError):
@@ -39,7 +41,7 @@ class AgentClient(Protocol):
     def respond(
         self,
         *,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         safety_identifier: str,
         allowed_tools: list[str],
         required_mcp_server: str | None = None,
@@ -93,14 +95,15 @@ class MockAgentClient:
         self.calls = 0
         self.last_allowed_tools: list[str] = []
         self.last_required_mcp_server: str | None = None
-        self.last_messages: list[dict[str, str]] = []
+        self.last_messages: list[dict[str, Any]] = []
         self.last_mcp_access_token: str | None = None
         self.last_instruction_overrides: dict[str, str] = {}
+        self.next_attachments: tuple[AgentAttachment, ...] = ()
 
     def respond(
         self,
         *,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         safety_identifier: str,
         allowed_tools: list[str],
         required_mcp_server: str | None = None,
@@ -113,10 +116,18 @@ class MockAgentClient:
         self.last_messages = messages
         self.last_mcp_access_token = mcp_access_token
         self.last_instruction_overrides = instruction_overrides or {}
-        latest = next(
+        latest_content = next(
             (item["content"] for item in reversed(messages) if item["role"] == "user"),
             "",
         )
+        if isinstance(latest_content, list):
+            latest = " ".join(
+                str(item.get("text") or item.get("filename") or "")
+                for item in latest_content
+                if isinstance(item, dict)
+            ).strip()
+        else:
+            latest = str(latest_content)
         answer = f"Демо-ответ sales-агента: {latest[:500]}"
         return AgentResult(
             text=answer,
@@ -127,6 +138,7 @@ class MockAgentClient:
                 input_tokens=max(len(latest) // 3, 1),
                 output_tokens=max(len(answer) // 3, 1),
             ),
+            attachments=self.next_attachments,
         )
 
 
@@ -175,12 +187,14 @@ class OpenAIAgentClient:
             raise McpUnavailableError(
                 f"MCP server {required_mcp_server} has no allowed tools"
             )
+        if self.settings.openai_enable_image_generation and not required_mcp_server:
+            tools.append({"type": "image_generation"})
         return tools
 
     def respond(
         self,
         *,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         safety_identifier: str,
         allowed_tools: list[str],
         required_mcp_server: str | None = None,
@@ -224,18 +238,25 @@ class OpenAIAgentClient:
             logger.warning("OpenAI request with optional MCP failed; retrying without MCP")
             kwargs["tools"] = []
             response = self.client.responses.create(**kwargs)
-        details = getattr(response.usage, "input_tokens_details", None)
+        response_usage = getattr(response, "usage", None)
+        details = getattr(response_usage, "input_tokens_details", None)
         usage = AgentUsage(
-            input_tokens=getattr(response.usage, "input_tokens", 0) or 0,
+            input_tokens=getattr(response_usage, "input_tokens", 0) or 0,
             cached_input_tokens=getattr(details, "cached_tokens", 0) or 0,
-            output_tokens=getattr(response.usage, "output_tokens", 0) or 0,
+            output_tokens=getattr(response_usage, "output_tokens", 0) or 0,
+        )
+        attachments = extract_response_attachments(
+            response,
+            max_count=self.settings.attachment_max_output_count,
+            max_bytes=self.settings.attachment_max_output_bytes,
         )
         return AgentResult(
-            text=response.output_text,
+            text=response.output_text or "",
             request_id=response.id,
             model=response.model,
             duration_ms=int((monotonic() - started) * 1000),
             usage=usage,
+            attachments=tuple(attachments),
         )
 
 
