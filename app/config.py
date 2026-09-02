@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = 1.0
     global_daily_request_limit: int = 1000
     global_daily_cost_limit_usd: float = 50.0
+    question_audit_retention_days: int = 30
+    question_audit_max_chars: int = 4000
+    admin_users_page_size: int = 10
 
     mcp_servers_json: str = ""
     mcp_servers_file: Path = Path("config/mcp_servers.json")

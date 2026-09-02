@@ -66,7 +66,40 @@ def test_initial_migration_upgrades_a_new_database(tmp_path, monkeypatch):
         "oauth_credentials",
         "skill_versions",
         "usage_events",
+        "user_question_audit",
+        "pending_conversation_feedback",
+        "conversation_feedback",
     }.issubset(inspector.get_table_names())
+
+
+def test_feedback_migration_accepts_tables_precreated_by_development_schema(
+    tmp_path, monkeypatch
+):
+    database_path = tmp_path / "development-precreated.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+
+    from sqlalchemy import create_engine, text
+
+    from app import models  # noqa: F401
+    from app.db import Base
+
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+        )
+        connection.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES ('20260902_01')")
+        )
+
+    config = Config(str(ROOT / "alembic.ini"))
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == (
+            "20260902_02"
+        )
 
 
 def test_webhook_registration_includes_admin_callbacks():

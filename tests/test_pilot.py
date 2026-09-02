@@ -21,14 +21,17 @@ from app.local_bot import LocalBotRuntime
 from app.logging_config import configure_logging
 from app.models import (
     AdminAudit,
+    ConversationFeedback,
     ConversationMessage,
     OAuthAuthorizationSession,
     OAuthCredential,
     OAuthDeviceSession,
+    PendingConversationFeedback,
     SkillVersion,
     UpdateJob,
     UsageEvent,
     UserAccess,
+    UserQuestionAudit,
 )
 from app.oauth import KeycloakOAuthClient, TokenPollResult, TokenResponse
 from app.skills import active_skill_version
@@ -129,14 +132,50 @@ def test_approved_flow_records_context_and_aggregate_metrics(runtime, post_updat
         assert session.scalar(select(func.count(ConversationMessage.id))) == 2
 
 
-def test_new_clears_context(runtime, post_update, drain):
+def test_new_requires_feedback_and_clears_context_after_rating(
+    runtime, post_update, drain
+):
     approve_user(runtime, post_update, drain)
     post_update(telegram_update(3, 101, "Первый вопрос"))
     drain()
     post_update(telegram_update(4, 101, "/new"))
     drain()
     with runtime["factory"]() as session:
+        assert session.scalar(select(func.count(ConversationMessage.id))) == 2
+        assert session.scalar(select(func.count(PendingConversationFeedback.id))) == 1
+    feedback_buttons = runtime["telegram"].markups[-1]["inline_keyboard"][0]
+    assert [button["callback_data"] for button in feedback_buttons] == [
+        "feedback:1",
+        "feedback:2",
+        "feedback:3",
+        "feedback:4",
+        "feedback:5",
+    ]
+
+    calls_before = runtime["agent"].calls
+    post_update(telegram_update(5, 101, "Вопрос до оценки"))
+    drain()
+    assert runtime["agent"].calls == calls_before
+    assert "Сначала оцените" in runtime["telegram"].messages[-1][1]
+
+    post_update(callback_update(6, 101, "feedback:5"))
+    drain()
+    with runtime["factory"]() as session:
         assert session.scalar(select(func.count(ConversationMessage.id))) == 0
+        assert session.scalar(select(func.count(PendingConversationFeedback.id))) == 0
+        feedback = session.scalar(select(ConversationFeedback))
+        assert feedback.rating == 5
+        assert feedback.question_count == 1
+        assert feedback.answer_count == 1
+
+
+def test_new_without_answer_starts_immediately(runtime, post_update, drain):
+    approve_user(runtime, post_update, drain)
+    post_update(telegram_update(3, 101, "/new"))
+    drain()
+    with runtime["factory"]() as session:
+        assert session.scalar(select(func.count(PendingConversationFeedback.id))) == 0
+    assert "Начат новый диалог" in runtime["telegram"].messages[-1][1]
 
 
 def test_second_message_receives_context(runtime, post_update, drain):
@@ -368,6 +407,101 @@ def test_admin_can_revoke_without_restart(runtime, post_update, drain):
         user = session.scalar(select(UserAccess).where(UserAccess.telegram_user_id == 101))
         assert user.status == "revoked"
         assert session.scalar(select(func.count(OAuthCredential.id))) == 0
+
+
+def test_admin_sees_users_questions_activity_and_can_restore_access(
+    runtime, post_update, drain
+):
+    approve_user(runtime, post_update, drain)
+    post_update(telegram_update(3, 101, "Покажи последние сделки компании Альфа"))
+    drain()
+
+    with runtime["factory"]() as session:
+        question = session.scalar(select(UserQuestionAudit))
+        assert question.question_text == "Покажи последние сделки компании Альфа"
+        assert question.result == "ok"
+        assert question.request_id
+
+    post_update(telegram_update(4, 900, "/users"))
+    drain()
+    assert "Активные:" in runtime["telegram"].messages[-1][1]
+    assert any(
+        button["callback_data"] == "user:view:101"
+        for row in runtime["telegram"].markups[-1]["inline_keyboard"]
+        for button in row
+    )
+
+    post_update(callback_update(5, 900, "user:view:101"))
+    drain()
+    assert "Карточка пользователя" in runtime["telegram"].messages[-1][1]
+    assert "Вопросов в журнале: 1" in runtime["telegram"].messages[-1][1]
+
+    post_update(callback_update(6, 900, "user:questions:101"))
+    drain()
+    assert "компании Альфа" in runtime["telegram"].messages[-1][1]
+
+    post_update(callback_update(7, 900, "user:revoke:101"))
+    drain()
+    with runtime["factory"]() as session:
+        assert session.scalar(
+            select(UserAccess.status).where(UserAccess.telegram_user_id == 101)
+        ) == "revoked"
+
+    post_update(telegram_update(8, 900, "/allow 101"))
+    drain()
+    with runtime["factory"]() as session:
+        assert session.scalar(
+            select(UserAccess.status).where(UserAccess.telegram_user_id == 101)
+        ) == "active"
+
+    post_update(telegram_update(9, 900, "/activity"))
+    drain()
+    assert "Вопросов за 24 часа: 1" in runtime["telegram"].messages[-1][1]
+
+
+def test_admin_sees_aggregate_satisfaction(runtime, post_update, drain):
+    approve_user(runtime, post_update, drain)
+    post_update(telegram_update(3, 101, "Первый вопрос"))
+    drain()
+    post_update(telegram_update(4, 101, "/new"))
+    drain()
+    post_update(callback_update(5, 101, "feedback:4"))
+    drain()
+
+    post_update(telegram_update(6, 900, "/satisfaction"))
+    drain()
+    message = runtime["telegram"].messages[-1][1]
+    assert "Средняя оценка: 4.00/5" in message
+    assert "CSAT (оценки 4–5): 100.0%" in message
+
+
+def test_admin_user_list_has_pagination(runtime, post_update, drain):
+    post_update(telegram_update(1, 900, "/start"))
+    drain()
+    with runtime["factory"]() as session:
+        for user_id in range(1000, 1011):
+            session.add(
+                UserAccess(
+                    telegram_user_id=user_id,
+                    chat_id=user_id,
+                    status="active",
+                    request_number=f"P-{user_id}",
+                )
+            )
+        session.commit()
+
+    post_update(telegram_update(2, 900, "/users"))
+    drain()
+    assert "из 12" in runtime["telegram"].messages[-1][1]
+    assert any(
+        button["callback_data"] == "user:list:all:1"
+        for row in runtime["telegram"].markups[-1]["inline_keyboard"]
+        for button in row
+    )
+
+    post_update(callback_update(3, 900, "user:list:all:1"))
+    drain()
+    assert "из 12" in runtime["telegram"].messages[-1][1]
 
 
 def test_main_menu_is_clear_and_maps_buttons_to_commands(runtime, post_update, drain):

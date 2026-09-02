@@ -18,6 +18,9 @@ BOT_COMMANDS = [
     {"command": "login", "description": "Войти через Keycloak"},
     {"command": "logout", "description": "Выйти из корпоративных систем"},
     {"command": "mcp_status", "description": "Проверить Jira, Bitrix и KTalk"},
+    {"command": "users", "description": "Пользователи (администратор)"},
+    {"command": "activity", "description": "Активность (администратор)"},
+    {"command": "satisfaction", "description": "Оценки диалогов (администратор)"},
 ]
 
 

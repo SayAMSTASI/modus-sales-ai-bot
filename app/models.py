@@ -6,6 +6,7 @@ from enum import StrEnum
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     Integer,
@@ -114,6 +115,55 @@ class UsageEvent(Base):
     cached_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class UserQuestionAudit(Base):
+    __tablename__ = "user_question_audit"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    update_job_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    asked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    question_text: Mapped[str] = mapped_column(Text)
+    scenario: Mapped[str] = mapped_column(String(64), default="other")
+    mcp_server: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result: Mapped[str] = mapped_column(String(32), default="processing", index=True)
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class PendingConversationFeedback(Base):
+    __tablename__ = "pending_conversation_feedback"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    conversation_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    question_count: Mapped[int] = mapped_column(Integer)
+    answer_count: Mapped[int] = mapped_column(Integer)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class ConversationFeedback(Base):
+    __tablename__ = "conversation_feedback"
+    __table_args__ = (
+        CheckConstraint("rating >= 1 AND rating <= 5", name="ck_feedback_rating"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_hash: Mapped[str] = mapped_column(String(80), index=True)
+    rating: Mapped[int] = mapped_column(Integer, index=True)
+    conversation_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    question_count: Mapped[int] = mapped_column(Integer)
+    answer_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
 
 
 class AdminAudit(Base):

@@ -22,6 +22,9 @@ MENU_ACTIONS = {
     "🛠 Навыки": "/skills",
     "🔎 MCP статус": "/mcp_status",
     "⚙️ Управление": "/admin",
+    "📊 Активность": "/activity",
+    "⭐ Удовлетворённость": "/satisfaction",
+    "👤 Пользователи": "/users",
 }
 
 
@@ -217,6 +220,8 @@ def ingest_update(
             "/tools",
             "/admin",
             "/admins",
+            "/activity",
+            "/satisfaction",
             "/login",
             "/logout",
             "/mcp_status",
@@ -239,11 +244,12 @@ def ingest_update(
             payload = text.removeprefix("/revoke").strip() if isinstance(text, str) else ""
         elif command in {"/admin_add", "/admin_remove"}:
             kind = command[1:]
-            payload = (
-                normalized_text.removeprefix(command).strip()
-                if isinstance(text, str)
-                else ""
-            )
+            command_parts = normalized_text.split(maxsplit=1)
+            payload = command_parts[1] if len(command_parts) == 2 else ""
+        elif command in {"/users", "/user", "/questions", "/allow"}:
+            kind = command[1:]
+            command_parts = normalized_text.split(maxsplit=1)
+            payload = command_parts[1] if len(command_parts) == 2 else ""
         elif text is None:
             kind = "unsupported"
             payload = None

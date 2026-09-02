@@ -9,17 +9,21 @@
 - несколько базовых администраторов из `ADMIN_TELEGRAM_IDS`;
 - добавление и удаление дополнительных администраторов через Telegram без перезапуска;
 - запрос доступа с Telegram-кнопками «Разрешить» и «Отклонить»;
-- отзыв доступа через `/revoke <telegram_id>` без перезапуска;
+- список и карточки пользователей, просмотр последних вопросов, блокировка и
+  восстановление доступа без перезапуска;
 - `/login` и `/logout` через Keycloak Device Flow либо Authorization Code + PKCE;
 - `/mcp_status` с фактическим состоянием OAuth и allowlist;
 - `/mcp_discover <сервер>` для безопасного чтения каталога tools администратором;
 - зашифрованное хранение персональных access/refresh token в БД и автоматический refresh;
 - передача токена текущего пользователя в `authorization` remote MCP tool;
 - единый read-only allowlist tools для Jira, Bitrix и KTalk;
-- отдельный контекст каждого пользователя, `/new` удаляет его;
+- отдельный контекст каждого пользователя; перед `/new` пользователь обязательно
+  оценивает прошлый диалог от 1 до 5;
 - общий Git-набор skills и версии из БД без перезапуска;
 - `/skills`, `/skill_show`, `/skill_edit`, `/skill_cancel`, `/skill_rollback` для администраторов;
-- агрегированные tokens/cost/latency/error metrics без полного текста диалога;
+- журнал вопросов с автором, временем и результатом обработки (по умолчанию 30 дней),
+  без копирования ответов агента;
+- агрегированные tokens/cost/latency/error metrics и статистика удовлетворённости;
 - SQLite для прямого локального запуска и PostgreSQL в Docker.
 
 ## MCP в текущей версии
@@ -75,7 +79,7 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 - `/start` — запросить или проверить доступ;
 - `/menu` — вернуть кнопки главного меню;
 - `/help` — показать помощь;
-- `/new` — удалить контекст диалога;
+- `/new` — оценить прошлый диалог и удалить его контекст;
 - `/login` — начать настроенный корпоративный OAuth flow;
 - `/logout` — отозвать и удалить OAuth-токены;
 - `/mcp_status` — показать фактически подключённые серверы и разрешённые tools;
@@ -84,6 +88,12 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 - `/skills` — выбрать skill, только администратор;
 - `/skill_show`, `/skill_edit`, `/skill_cancel`, `/skill_rollback` — управление выбранным skill;
 - `/revoke 123456789` — отозвать доступ пользователя.
+- `/users [active|pending|revoked]` — список пользователей, только администратор;
+- `/user 123456789` — карточка пользователя;
+- `/questions 123456789` — последние вопросы пользователя;
+- `/allow 123456789` — разрешить или восстановить доступ;
+- `/activity` — активность, токены, стоимость и время ответа за 7 дней;
+- `/satisfaction` — средняя оценка, CSAT и распределение оценок;
 - `/admins` — показать всех администраторов;
 - `/admin_add 123456789` — назначить дополнительного администратора;
 - `/admin_remove 123456789` — снять дополнительные административные права.
@@ -102,8 +112,15 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 - `TOKEN_ENCRYPTION_KEY` — постоянный Fernet key вне Git и БД;
 - `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`;
 - `MCP_SERVERS_FILE=config/mcp_servers.json`.
+- `QUESTION_AUDIT_RETENTION_DAYS=30` — срок хранения текста вопросов;
+- `QUESTION_AUDIT_MAX_CHARS=4000` — максимальная длина записи вопроса;
+- `ADMIN_USERS_PAGE_SIZE=10` — число пользователей в одном списке Telegram.
 
 Все три MCP получают персональный Keycloak token текущего Telegram-пользователя. Статические MCP-токены из environment больше не используются.
+
+Администраторы видят в Telegram автора, время и текст вопросов. Ответы агента в
+административный журнал не копируются. OAuth-токены и другие секреты не показываются
+и не записываются в этот журнал.
 
 Для `authorization_code` Keycloak должен разрешать точный redirect URI
 `<PUBLIC_BASE_URL>/oauth/callback` и требовать PKCE `S256`. Бот генерирует собственные

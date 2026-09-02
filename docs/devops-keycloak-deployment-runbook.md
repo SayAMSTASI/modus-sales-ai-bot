@@ -148,6 +148,9 @@ TELEGRAM_WEBHOOK_SECRET=<secret>
 ADMIN_TELEGRAM_IDS=<telegram_id>[,<telegram_id>]
 PILOT_TELEGRAM_IDS=
 SAFETY_IDENTIFIER_SECRET=<secret>
+QUESTION_AUDIT_RETENTION_DAYS=30
+QUESTION_AUDIT_MAX_CHARS=4000
+ADMIN_USERS_PAGE_SIZE=10
 
 AGENT_BACKEND=openai
 OPENAI_API_KEY=<secret>
@@ -241,6 +244,12 @@ docker compose --env-file "$ENV_FILE" run --rm web \
 13. Выполнить `/mcp ktalk покажи последние записи` и получить результат либо зафиксированную ошибку upstream KTalk.
 14. Выполнить `/logout`; следующий `/mcp jira ...` снова требует `/login`.
 15. Администратор отзывает доступ; новые OpenAI/MCP-вызовы блокируются без перезапуска.
+16. `/users` показывает пользователя; из карточки доступны последние вопросы,
+    блокировка и возврат доступа.
+17. После диалога `/new` запрашивает оценку 1–5, до оценки новый вопрос не уходит
+    в OpenAI/MCP, после оценки контекст очищается.
+18. `/activity` показывает агрегированную активность, `/satisfaction` — среднюю
+    оценку, CSAT и распределение оценок.
 
 ## 10. Проверка логов и секретов
 
@@ -264,7 +273,7 @@ docker compose --env-file "$ENV_FILE" logs --tail 200 web worker
 - allowlist;
 - OAuth-токенов;
 - версий skills;
-- admin audit и usage metrics.
+- admin audit, журнал вопросов, оценки диалогов и usage metrics.
 
 Не менять `TOKEN_ENCRYPTION_KEY` при обычном рестарте или обновлении.
 

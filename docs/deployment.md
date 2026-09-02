@@ -28,6 +28,8 @@
 - `PUBLIC_BASE_URL`;
 - `TELEGRAM_BOT_TOKEN` и случайный `TELEGRAM_WEBHOOK_SECRET`;
 - `ADMIN_TELEGRAM_IDS`, `PILOT_TELEGRAM_IDS` и `SAFETY_IDENTIFIER_SECRET`;
+- `QUESTION_AUDIT_RETENTION_DAYS`, `QUESTION_AUDIT_MAX_CHARS` и
+  `ADMIN_USERS_PAGE_SIZE`;
 - `AGENT_BACKEND=openai`, `OPENAI_API_KEY`, утверждённая модель и актуальные тарифы;
 - `KEYCLOAK_ISSUER`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_SCOPES`;
 - `KEYCLOAK_RESOURCE=https://mcp.modusbi.ru`;
@@ -57,7 +59,9 @@ Reverse proxy направляет `https://<domain>/telegram/webhook` и `https
 4. Access/refresh tokens зашифрованы в PostgreSQL, обновляются и удаляются при `/logout` или revoke.
 5. Утверждён read-only allowlist для каждого MCP; write tools недоступны.
 6. KTalk-ссылка возвращает реальный протокол, Jira — реальную задачу, Bitrix — разрешённые пользователю данные.
-7. OpenAI request использует `store=false`; секреты и текст диалога отсутствуют в технических логах.
+7. OpenAI request использует `store=false`; секреты и текст диалога отсутствуют в
+   технических логах. Текст вопросов сохраняется только в таблице административного
+   журнала на настроенный срок; ответы агента туда не копируются.
 8. Backup PostgreSQL восстановлен на тестовом стенде.
 9. Есть алерты на недоступность, рост ошибок, лимиты OpenAI и заполнение диска.
 10. Зафиксированы версия образа, commit SHA и команда rollback.

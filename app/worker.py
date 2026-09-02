@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent import AgentClient, McpUnavailableError, build_agent_client, calculate_cost_usd
@@ -21,14 +21,17 @@ from app.metrics import MetricsExporter, build_metrics_exporter
 from app.models import (
     AccessStatus,
     AdminAudit,
+    ConversationFeedback,
     ConversationMessage,
     JobStatus,
     OAuthAuthorizationSession,
     OAuthDeviceSession,
+    PendingConversationFeedback,
     SkillEditSession,
     UpdateJob,
     UsageEvent,
     UserAccess,
+    UserQuestionAudit,
 )
 from app.oauth import (
     KeycloakOAuthClient,
@@ -138,11 +141,18 @@ def main_menu_markup(*, admin: bool) -> dict[str, Any]:
             [
                 [
                     {"text": "⚙️ Управление"},
-                    {"text": "🔎 MCP статус"},
+                    {"text": "👤 Пользователи"},
                 ],
                 [
                     {"text": "👥 Администраторы"},
                     {"text": "🛠 Навыки"},
+                ],
+                [
+                    {"text": "🔎 MCP статус"},
+                    {"text": "📊 Активность"},
+                ],
+                [
+                    {"text": "⭐ Удовлетворённость"},
                 ],
             ]
         )
@@ -161,6 +171,8 @@ def help_text(*, admin: bool) -> str:
         "• Применяет общий набор sales skills.\n"
         "• Читает задачи Jira, данные CRM Bitrix и записи KTalk через MCP.\n"
         "• Работает только с вашими корпоративными правами после /login.\n\n"
+        "Администраторы видят автора, время и текст вопросов в журнале активности. "
+        "Ответы агента и OAuth-токены в этот журнал не копируются.\n\n"
         "Как пользоваться\n"
         "1. Нажмите «🔐 Авторизация» и выполните /login.\n"
         "2. Просто опишите задачу обычным текстом.\n"
@@ -176,6 +188,8 @@ def help_text(*, admin: bool) -> str:
             "• «⚙️ Управление» — команды управления.\n"
             "• «👥 Администраторы» — список администраторов.\n"
             "• «🛠 Навыки» — просмотр и изменение skills.\n"
+            "• «📊 Активность» — пользователи, запросы и расход.\n"
+            "• «⭐ Удовлетворённость» — оценки завершённых диалогов.\n"
             "• /admin_add <Telegram ID> — добавить администратора.\n"
             "• /admin_remove <Telegram ID> — убрать добавленного администратора.\n"
             "• /revoke <Telegram ID> — отозвать доступ пользователя."
@@ -205,12 +219,18 @@ class JobProcessor:
         )
 
     def _claim(self, session: Session) -> UpdateJob | None:
-        cleanup = session.execute(
+        messages_cleanup = session.execute(
             delete(ConversationMessage).where(
                 ConversationMessage.expires_at <= datetime.now(UTC)
             )
         )
-        if cleanup.rowcount:
+        audit_cutoff = datetime.now(UTC) - timedelta(
+            days=max(1, self.settings.question_audit_retention_days)
+        )
+        audit_cleanup = session.execute(
+            delete(UserQuestionAudit).where(UserQuestionAudit.asked_at < audit_cutoff)
+        )
+        if messages_cleanup.rowcount or audit_cleanup.rowcount:
             session.commit()
         job = session.scalar(
             select(UpdateJob)
@@ -285,6 +305,133 @@ class JobProcessor:
                 metadata_json=json.dumps(metadata or {}, ensure_ascii=False),
             )
         )
+
+    @staticmethod
+    def _feedback_markup() -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": f"{rating} {'⭐' if rating == 5 else ''}".strip(),
+                        "callback_data": f"feedback:{rating}",
+                    }
+                    for rating in range(1, 6)
+                ]
+            ]
+        }
+
+    def _send_feedback_request(self, session: Session, job: UpdateJob) -> None:
+        pending = session.scalar(
+            select(PendingConversationFeedback).where(
+                PendingConversationFeedback.telegram_user_id == job.telegram_user_id
+            )
+        )
+        if pending is None:
+            messages = session.scalars(
+                select(ConversationMessage)
+                .where(
+                    ConversationMessage.telegram_user_id == job.telegram_user_id,
+                    ConversationMessage.chat_id == job.chat_id,
+                )
+                .order_by(ConversationMessage.created_at)
+            ).all()
+            question_count = sum(item.role == "user" for item in messages)
+            answer_count = sum(item.role == "assistant" for item in messages)
+            if answer_count == 0:
+                session.execute(
+                    delete(ConversationMessage).where(
+                        ConversationMessage.telegram_user_id == job.telegram_user_id,
+                        ConversationMessage.chat_id == job.chat_id,
+                    )
+                )
+                self._send_and_finish(
+                    session,
+                    job,
+                    "Начат новый диалог — напишите новую задачу.",
+                    main_menu_markup(
+                        admin=is_admin(session, self.settings, job.telegram_user_id)
+                    ),
+                )
+                return
+            pending = PendingConversationFeedback(
+                telegram_user_id=job.telegram_user_id,
+                chat_id=job.chat_id,
+                conversation_started_at=messages[0].created_at,
+                question_count=question_count,
+                answer_count=answer_count,
+            )
+            session.add(pending)
+        self._send_and_finish(
+            session,
+            job,
+            "Перед новым диалогом оцените ответы прошлого чата.\n\n"
+            "1 — совсем не помогли, 5 — полностью решили задачу.",
+            self._feedback_markup(),
+        )
+
+    def _process_feedback_callback(
+        self,
+        session: Session,
+        job: UpdateJob,
+        callback_id: str,
+        data: str,
+    ) -> bool:
+        if not data.startswith("feedback:"):
+            return False
+        try:
+            rating = int(data.split(":", 1)[1])
+            if rating not in range(1, 6):
+                raise ValueError
+        except ValueError:
+            self.telegram.answer_callback_query(callback_id, "Некорректная оценка")
+            self._finish(session, job)
+            return True
+        pending = session.scalar(
+            select(PendingConversationFeedback).where(
+                PendingConversationFeedback.telegram_user_id == job.telegram_user_id
+            )
+        )
+        if pending is None:
+            self.telegram.answer_callback_query(callback_id, "Оценка уже сохранена")
+            self._send_and_finish(
+                session,
+                job,
+                "Этот диалог уже завершён. Можно отправлять новую задачу.",
+                main_menu_markup(
+                    admin=is_admin(session, self.settings, job.telegram_user_id)
+                ),
+            )
+            return True
+        session.add(
+            ConversationFeedback(
+                telegram_user_id=job.telegram_user_id,
+                user_hash=stable_user_hash(
+                    job.telegram_user_id,
+                    self.settings.safety_identifier_secret,
+                ),
+                rating=rating,
+                conversation_started_at=pending.conversation_started_at,
+                question_count=pending.question_count,
+                answer_count=pending.answer_count,
+            )
+        )
+        session.execute(
+            delete(ConversationMessage).where(
+                ConversationMessage.telegram_user_id == job.telegram_user_id,
+                ConversationMessage.chat_id == pending.chat_id,
+            )
+        )
+        session.delete(pending)
+        self.telegram.answer_callback_query(callback_id, "Спасибо за оценку")
+        self._send_and_finish(
+            session,
+            job,
+            f"Спасибо! Оценка {rating} из 5 сохранена. Начат новый диалог.",
+            main_menu_markup(
+                admin=is_admin(session, self.settings, job.telegram_user_id)
+            ),
+        )
+        return True
 
     def _load_context(self, session: Session, job: UpdateJob) -> list[dict[str, str]]:
         now = datetime.now(UTC)
@@ -374,6 +521,11 @@ class JobProcessor:
         )
         if target is None:
             return "Пользователь не найден."
+        if action != "approve" and target_id in self.settings.admin_ids():
+            return (
+                "Это базовый администратор из ADMIN_TELEGRAM_IDS. "
+                "Его нельзя заблокировать через Telegram."
+            )
         if action == "approve":
             target.status = AccessStatus.active
             target.allowed_tools_json = json.dumps(shared_allowed_tools(self.settings))
@@ -396,6 +548,11 @@ class JobProcessor:
         session.execute(
             delete(ConversationMessage).where(
                 ConversationMessage.telegram_user_id == target_id
+            )
+        )
+        session.execute(
+            delete(PendingConversationFeedback).where(
+                PendingConversationFeedback.telegram_user_id == target_id
             )
         )
         self.oauth_store.delete(session, target_id)
@@ -483,11 +640,14 @@ class JobProcessor:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             self._finish(session, job)
             return
+        if self._process_feedback_callback(session, job, callback_id, data):
+            return
         if not is_admin(session, self.settings, job.telegram_user_id):
             self.telegram.answer_callback_query(callback_id, "Недостаточно прав")
             self._send_and_finish(session, job, "Команда доступна только администратору.")
             return
         parts = data.split(":")
+        markup: dict[str, Any] | None = None
         if len(parts) == 3 and parts[0] == "access" and parts[1] in {
             "approve",
             "deny",
@@ -499,10 +659,45 @@ class JobProcessor:
                 text = "Некорректный Telegram ID."
         elif parts and parts[0] == "skill":
             text = self._process_skill_callback(session, job, parts)
+        elif len(parts) >= 3 and parts[0] == "user":
+            action = parts[1]
+            try:
+                if action == "list":
+                    page = int(parts[3]) if len(parts) == 4 else 0
+                    text, markup = self._users_overview(session, parts[2], page)
+                else:
+                    target_id = int(parts[2])
+                    if action == "view":
+                        text, markup = self._user_card(session, target_id)
+                    elif action == "questions":
+                        text = self._user_questions_text(session, target_id)
+                        markup = {
+                            "inline_keyboard": [
+                                [
+                                    {
+                                        "text": "⬅️ К пользователю",
+                                        "callback_data": f"user:view:{target_id}",
+                                    }
+                                ]
+                            ]
+                        }
+                    elif action in {"allow", "revoke"}:
+                        access_action = "approve" if action == "allow" else "revoke"
+                        text = self._process_access_callback(
+                            session,
+                            job,
+                            access_action,
+                            target_id,
+                        )
+                        _, markup = self._user_card(session, target_id)
+                    else:
+                        text = "Неизвестное действие."
+            except ValueError:
+                text = "Некорректный Telegram ID."
         else:
             text = "Неизвестное действие."
-        self.telegram.answer_callback_query(callback_id, text)
-        self._send_and_finish(session, job, text)
+        self.telegram.answer_callback_query(callback_id, "Готово")
+        self._send_and_finish(session, job, text, markup)
 
     def _process_skill_command(self, session: Session, job: UpdateJob) -> None:
         if not is_admin(session, self.settings, job.telegram_user_id):
@@ -571,9 +766,309 @@ class JobProcessor:
                 f"Skill {skill_name} возвращён к: {source}.",
             )
 
+    @staticmethod
+    def _status_label(status: str) -> str:
+        return {
+            AccessStatus.active: "🟢 активен",
+            AccessStatus.pending: "🟡 ожидает",
+            AccessStatus.revoked: "🔴 заблокирован",
+        }.get(status, status)
+
+    def _user_questions_text(
+        self,
+        session: Session,
+        telegram_user_id: int,
+    ) -> str:
+        user = session.scalar(
+            select(UserAccess).where(UserAccess.telegram_user_id == telegram_user_id)
+        )
+        if user is None:
+            return "Пользователь не найден."
+        questions = session.scalars(
+            select(UserQuestionAudit)
+            .where(UserQuestionAudit.telegram_user_id == telegram_user_id)
+            .order_by(UserQuestionAudit.asked_at.desc())
+            .limit(10)
+        ).all()
+        if not questions:
+            return f"У пользователя {telegram_user_id} пока нет сохранённых вопросов."
+        username = f"@{user.telegram_username}" if user.telegram_username else "без username"
+        rows = [f"Последние вопросы {username} ({telegram_user_id})"]
+        for item in questions:
+            text = item.question_text.replace("\n", " ").strip()
+            if len(text) > 500:
+                text = text[:497] + "..."
+            asked_at = item.asked_at.strftime("%d.%m.%Y %H:%M")
+            rows.append(f"\n{asked_at} UTC · {item.result}\n{text}")
+        return "\n".join(rows)
+
+    def _user_card(
+        self,
+        session: Session,
+        telegram_user_id: int,
+    ) -> tuple[str, dict[str, Any] | None]:
+        user = session.scalar(
+            select(UserAccess).where(UserAccess.telegram_user_id == telegram_user_id)
+        )
+        if user is None:
+            return "Пользователь не найден.", None
+        user_hash = stable_user_hash(
+            telegram_user_id,
+            self.settings.safety_identifier_secret,
+        )
+        question_count, last_question = session.execute(
+            select(
+                func.count(UserQuestionAudit.id),
+                func.max(UserQuestionAudit.asked_at),
+            ).where(UserQuestionAudit.telegram_user_id == telegram_user_id)
+        ).one()
+        requests, input_tokens, output_tokens, cost = session.execute(
+            select(
+                func.count(UsageEvent.id),
+                func.coalesce(func.sum(UsageEvent.input_tokens), 0),
+                func.coalesce(func.sum(UsageEvent.output_tokens), 0),
+                func.coalesce(func.sum(UsageEvent.estimated_cost_usd), 0.0),
+            ).where(UsageEvent.user_hash == user_hash)
+        ).one()
+        feedback_count, average_rating = session.execute(
+            select(
+                func.count(ConversationFeedback.id),
+                func.avg(ConversationFeedback.rating),
+            ).where(ConversationFeedback.telegram_user_id == telegram_user_id)
+        ).one()
+        username = f"@{user.telegram_username}" if user.telegram_username else "не указан"
+        last_activity = (
+            last_question.strftime("%d.%m.%Y %H:%M UTC")
+            if last_question is not None
+            else "нет"
+        )
+        rating = f"{float(average_rating):.2f}/5" if average_rating is not None else "нет"
+        role_label = (
+            "администратор"
+            if is_admin(session, self.settings, telegram_user_id)
+            else "пользователь"
+        )
+        text = (
+            "Карточка пользователя\n\n"
+            f"Telegram ID: {telegram_user_id}\n"
+            f"Username: {username}\n"
+            f"Статус: {self._status_label(user.status)}\n"
+            f"Роль: {role_label}\n"
+            f"Последняя активность: {last_activity}\n"
+            f"Вопросов в журнале: {question_count}\n"
+            f"Успешных запросов: {requests}\n"
+            f"Токены input/output: {input_tokens}/{output_tokens}\n"
+            f"Расчётная стоимость: ${float(cost):.4f}\n"
+            f"Оценка диалогов: {rating} ({feedback_count})"
+        )
+        action = "allow" if user.status != AccessStatus.active else "revoke"
+        action_text = "✅ Разблокировать" if action == "allow" else "⛔ Заблокировать"
+        markup = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "📝 Последние вопросы",
+                        "callback_data": f"user:questions:{telegram_user_id}",
+                    }
+                ],
+                [
+                    {
+                        "text": action_text,
+                        "callback_data": f"user:{action}:{telegram_user_id}",
+                    }
+                ],
+                [{"text": "⬅️ К списку", "callback_data": "user:list:all"}],
+            ]
+        }
+        return text, markup
+
+    def _users_overview(
+        self,
+        session: Session,
+        status_filter: str,
+        page: int = 0,
+    ) -> tuple[str, dict[str, Any]]:
+        allowed_filters = {"all", "active", "pending", "revoked"}
+        if status_filter not in allowed_filters:
+            status_filter = "all"
+        page_size = max(1, min(self.settings.admin_users_page_size, 50))
+        statement = select(UserAccess).order_by(UserAccess.updated_at.desc())
+        count_statement = select(func.count(UserAccess.id))
+        if status_filter != "all":
+            statement = statement.where(UserAccess.status == status_filter)
+            count_statement = count_statement.where(UserAccess.status == status_filter)
+        filtered_total = session.scalar(count_statement) or 0
+        max_page = max(0, (filtered_total - 1) // page_size)
+        page = max(0, min(page, max_page))
+        users = session.scalars(
+            statement.offset(page * page_size).limit(page_size)
+        ).all()
+        totals = {
+            status: session.scalar(
+                select(func.count(UserAccess.id)).where(UserAccess.status == status)
+            )
+            or 0
+            for status in (AccessStatus.active, AccessStatus.pending, AccessStatus.revoked)
+        }
+        text = (
+            "Пользователи\n\n"
+            f"🟢 Активные: {totals[AccessStatus.active]}\n"
+            f"🟡 Ожидают: {totals[AccessStatus.pending]}\n"
+            f"🔴 Заблокированы: {totals[AccessStatus.revoked]}\n\n"
+            f"Фильтр: {status_filter}. "
+            f"Показано {page * page_size + 1 if filtered_total else 0}–"
+            f"{min((page + 1) * page_size, filtered_total)} из {filtered_total}.\n"
+            "Нажмите пользователя для карточки."
+        )
+        buttons = []
+        for user in users:
+            username = f"@{user.telegram_username}" if user.telegram_username else str(
+                user.telegram_user_id
+            )
+            symbol = {
+                AccessStatus.active: "🟢",
+                AccessStatus.pending: "🟡",
+                AccessStatus.revoked: "🔴",
+            }.get(user.status, "•")
+            buttons.append(
+                [
+                    {
+                        "text": f"{symbol} {username}",
+                        "callback_data": f"user:view:{user.telegram_user_id}",
+                    }
+                ]
+            )
+        buttons.append(
+            [
+                {"text": "Все", "callback_data": "user:list:all"},
+                {"text": "Активные", "callback_data": "user:list:active"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": "Ожидают", "callback_data": "user:list:pending"},
+                {"text": "Блок", "callback_data": "user:list:revoked"},
+            ]
+        )
+        paging = []
+        if page > 0:
+            paging.append(
+                {
+                    "text": "⬅️ Назад",
+                    "callback_data": f"user:list:{status_filter}:{page - 1}",
+                }
+            )
+        if page < max_page:
+            paging.append(
+                {
+                    "text": "Далее ➡️",
+                    "callback_data": f"user:list:{status_filter}:{page + 1}",
+                }
+            )
+        if paging:
+            buttons.append(paging)
+        return text, {"inline_keyboard": buttons}
+
+    def _activity_text(self, session: Session) -> str:
+        now = datetime.now(UTC)
+        day = now - timedelta(days=1)
+        week = now - timedelta(days=7)
+        questions_day = session.scalar(
+            select(func.count(UserQuestionAudit.id)).where(
+                UserQuestionAudit.asked_at >= day
+            )
+        ) or 0
+        questions_week = session.scalar(
+            select(func.count(UserQuestionAudit.id)).where(
+                UserQuestionAudit.asked_at >= week
+            )
+        ) or 0
+        requests, tokens, cost, average_ms = session.execute(
+            select(
+                func.count(UsageEvent.id),
+                func.coalesce(
+                    func.sum(UsageEvent.input_tokens + UsageEvent.output_tokens), 0
+                ),
+                func.coalesce(func.sum(UsageEvent.estimated_cost_usd), 0.0),
+                func.avg(UsageEvent.duration_ms),
+            ).where(UsageEvent.occurred_at >= week)
+        ).one()
+        active_users = session.scalar(
+            select(func.count(UserAccess.id)).where(
+                UserAccess.status == AccessStatus.active
+            )
+        ) or 0
+        return (
+            "Активность пилота\n\n"
+            f"Активных пользователей: {active_users}\n"
+            f"Вопросов за 24 часа: {questions_day}\n"
+            f"Вопросов за 7 дней: {questions_week}\n"
+            f"Успешных OpenAI-запросов за 7 дней: {requests}\n"
+            f"Токенов за 7 дней: {tokens}\n"
+            f"Стоимость за 7 дней: ${float(cost):.4f}\n"
+            f"Среднее время ответа: {float(average_ms or 0):.0f} мс\n\n"
+            "Список пользователей: /users"
+        )
+
+    @staticmethod
+    def _satisfaction_text(session: Session) -> str:
+        ratings = list(session.scalars(select(ConversationFeedback.rating)))
+        week_start = datetime.now(UTC) - timedelta(days=7)
+        weekly = list(
+            session.scalars(
+                select(ConversationFeedback.rating).where(
+                    ConversationFeedback.created_at >= week_start
+                )
+            )
+        )
+        if not ratings:
+            return "Удовлетворённость\n\nОценок пока нет."
+        average = sum(ratings) / len(ratings)
+        csat = sum(rating >= 4 for rating in ratings) / len(ratings) * 100
+        distribution = " · ".join(
+            f"{rating}⭐: {ratings.count(rating)}" for rating in range(1, 6)
+        )
+        weekly_text = (
+            f"{sum(weekly) / len(weekly):.2f}/5 ({len(weekly)})"
+            if weekly
+            else "нет оценок"
+        )
+        return (
+            "Удовлетворённость\n\n"
+            f"Всего оценок: {len(ratings)}\n"
+            f"Средняя оценка: {average:.2f}/5\n"
+            f"CSAT (оценки 4–5): {csat:.1f}%\n"
+            f"За последние 7 дней: {weekly_text}\n\n"
+            f"Распределение: {distribution}"
+        )
+
     def _process_admin_command(self, session: Session, job: UpdateJob) -> None:
         if not is_admin(session, self.settings, job.telegram_user_id):
             self._send_and_finish(session, job, "Команда доступна только администратору.")
+            return
+
+        if job.kind == "users":
+            status_filter = (job.payload_text or "all").strip().lower() or "all"
+            text, markup = self._users_overview(session, status_filter)
+            self._send_and_finish(session, job, text, markup)
+            return
+
+        if job.kind == "activity":
+            self._send_and_finish(
+                session,
+                job,
+                self._activity_text(session),
+                main_menu_markup(admin=True),
+            )
+            return
+
+        if job.kind == "satisfaction":
+            self._send_and_finish(
+                session,
+                job,
+                self._satisfaction_text(session),
+                main_menu_markup(admin=True),
+            )
             return
 
         if job.kind == "admin":
@@ -581,10 +1076,16 @@ class JobProcessor:
                 session,
                 job,
                 "Управление ботом\n\n"
+                "• Пользователи — /users, карточка, вопросы и блокировка.\n"
                 "• 👥 Администраторы — посмотреть текущих администраторов.\n"
                 "• 🛠 Навыки — выбрать и изменить skill.\n"
-                "• 🔎 MCP статус — проверить корпоративные интеграции.\n\n"
+                "• 🔎 MCP статус — проверить корпоративные интеграции.\n"
+                "• 📊 Активность — обращения и расход за 7 дней.\n"
+                "• ⭐ Удовлетворённость — средняя оценка и CSAT.\n\n"
                 "Команды с параметром:\n"
+                "/user <Telegram ID> — карточка пользователя;\n"
+                "/questions <Telegram ID> — последние вопросы;\n"
+                "/allow <Telegram ID> — разрешить или вернуть доступ;\n"
                 "/admin_add <Telegram ID> — добавить администратора;\n"
                 "/admin_remove <Telegram ID> — убрать добавленного администратора;\n"
                 "/revoke <Telegram ID> — отозвать доступ пользователя.",
@@ -618,6 +1119,45 @@ class JobProcessor:
                 "Убрать: /admin_remove <Telegram ID>",
                 main_menu_markup(admin=True),
             )
+            return
+
+        if job.kind in {"user", "questions", "allow"}:
+            raw_target = (job.payload_text or "").strip()
+            try:
+                target_id = int(raw_target)
+                if target_id <= 0:
+                    raise ValueError
+            except ValueError:
+                self._send_and_finish(
+                    session,
+                    job,
+                    f"Формат: /{job.kind} <числовой Telegram ID>.",
+                    main_menu_markup(admin=True),
+                )
+                return
+            if job.kind == "user":
+                text, markup = self._user_card(session, target_id)
+            elif job.kind == "questions":
+                text = self._user_questions_text(session, target_id)
+                markup = {
+                    "inline_keyboard": [
+                        [
+                            {
+                                "text": "⬅️ К пользователю",
+                                "callback_data": f"user:view:{target_id}",
+                            }
+                        ]
+                    ]
+                }
+            else:
+                text = self._process_access_callback(
+                    session,
+                    job,
+                    "approve",
+                    target_id,
+                )
+                _, markup = self._user_card(session, target_id)
+            self._send_and_finish(session, job, text, markup)
             return
 
         raw_target = (job.payload_text or "").strip()
@@ -924,15 +1464,53 @@ class JobProcessor:
             )
             return
         if job.response_text is None:
+            pending_feedback = session.scalar(
+                select(PendingConversationFeedback).where(
+                    PendingConversationFeedback.telegram_user_id
+                    == job.telegram_user_id
+                )
+            )
+            if pending_feedback is not None:
+                self._send_and_finish(
+                    session,
+                    job,
+                    "Сначала оцените ответы прошлого диалога, затем можно будет "
+                    "начать новый.",
+                    self._feedback_markup(),
+                )
+                return
+            message_text = (
+                message_text if message_text is not None else (job.payload_text or "")
+            )
+            question_audit = session.scalar(
+                select(UserQuestionAudit).where(
+                    UserQuestionAudit.update_job_id == job.id
+                )
+            )
+            if question_audit is None:
+                question_audit = UserQuestionAudit(
+                    update_job_id=job.id,
+                    telegram_user_id=job.telegram_user_id,
+                    chat_id=job.chat_id,
+                    question_text=message_text[
+                        : max(1, self.settings.question_audit_max_chars)
+                    ],
+                    scenario=classify_scenario(message_text),
+                    mcp_server=required_mcp_server,
+                    result="processing",
+                )
+                session.add(question_audit)
+                session.commit()
             limit_reason = check_limits(session, user, self.settings)
             if limit_reason:
+                question_audit.result = "limit_denied"
+                session.commit()
                 self._send_and_finish(
                     session,
                     job,
                     "Общий дневной лимит пилота исчерпан. Обратитесь к администратору.",
                 )
                 return
-            message_text = message_text if message_text is not None else (job.payload_text or "")
             history = self._load_context(session, job)
             history.append({"role": "user", "content": message_text})
             user_hash = stable_user_hash(
@@ -944,6 +1522,8 @@ class JobProcessor:
             except (OAuthConfigurationError, OAuthLoginRequired):
                 mcp_token = None
             if required_mcp_server and not mcp_token:
+                question_audit.result = "authorization_required"
+                session.commit()
                 self._send_and_finish(
                     session,
                     job,
@@ -970,6 +1550,8 @@ class JobProcessor:
                     instruction_overrides=active_skill_overrides(session),
                 )
             except McpUnavailableError:
+                question_audit.result = "mcp_unavailable"
+                session.commit()
                 self._send_and_finish(
                     session,
                     job,
@@ -990,6 +1572,8 @@ class JobProcessor:
                 estimated_cost_usd=calculate_cost_usd(result.usage, self.settings),
             )
             session.add(event)
+            question_audit.result = "ok"
+            question_audit.request_id = result.request_id
             job.response_text = result.text
             session.commit()
             try:
@@ -1058,7 +1642,9 @@ class JobProcessor:
                     job,
                     "Sales AI готов к работе.\n\n"
                     "Напишите задачу обычным текстом или выберите действие ниже. "
-                    "Для Jira, Bitrix и KTalk сначала нужна корпоративная авторизация.",
+                    "Для Jira, Bitrix и KTalk сначала нужна корпоративная авторизация.\n\n"
+                    "Администраторы пилота видят автора, время и текст вопросов; "
+                    "ответы агента в журнал не копируются.",
                     main_menu_markup(
                         admin=is_admin(session, self.settings, job.telegram_user_id)
                     ),
@@ -1078,20 +1664,7 @@ class JobProcessor:
                 main_menu_markup(admin=admin),
             )
         elif job.kind == "new":
-            session.execute(
-                delete(ConversationMessage).where(
-                    ConversationMessage.telegram_user_id == job.telegram_user_id,
-                    ConversationMessage.chat_id == job.chat_id,
-                )
-            )
-            self._send_and_finish(
-                session,
-                job,
-                "Контекст очищен. Начат новый диалог — напишите новую задачу.",
-                main_menu_markup(
-                    admin=is_admin(session, self.settings, job.telegram_user_id)
-                ),
-            )
+            self._send_feedback_request(session, job)
         elif job.kind == "auth":
             try:
                 authorized = bool(
@@ -1213,7 +1786,18 @@ class JobProcessor:
             "skill_rollback",
         }:
             self._process_skill_command(session, job)
-        elif job.kind in {"admin", "admins", "admin_add", "admin_remove"}:
+        elif job.kind in {
+            "admin",
+            "admins",
+            "admin_add",
+            "admin_remove",
+            "users",
+            "user",
+            "questions",
+            "allow",
+            "activity",
+            "satisfaction",
+        }:
             self._process_admin_command(session, job)
         elif job.kind == "revoke":
             if not is_admin(session, self.settings, job.telegram_user_id):
@@ -1293,6 +1877,13 @@ class JobProcessor:
                 job = session.get(UpdateJob, job.id)
                 if job is None:
                     raise
+                question_audit = session.scalar(
+                    select(UserQuestionAudit).where(
+                        UserQuestionAudit.update_job_id == job.id
+                    )
+                )
+                if question_audit is not None:
+                    question_audit.result = f"error:{type(exc).__name__}"[:32]
                 job.error_code = type(exc).__name__
                 if job.attempts >= self.settings.max_job_attempts:
                     job.status = JobStatus.failed
