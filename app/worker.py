@@ -52,6 +52,7 @@ from app.oauth import (
 from app.policy import check_limits
 from app.security import stable_user_hash
 from app.skills import (
+    PRIMARY_SKILL_NAME,
     active_skill_overrides,
     active_skill_version,
     available_skills,
@@ -498,7 +499,10 @@ class JobProcessor:
                 ConversationMessage.chat_id == job.chat_id,
                 ConversationMessage.expires_at > now,
             )
-            .order_by(ConversationMessage.created_at.desc())
+            .order_by(
+                ConversationMessage.created_at.desc(),
+                ConversationMessage.id.desc(),
+            )
             .limit(self.settings.context_max_messages)
         ).all()
         selected: list[ConversationMessage] = []
@@ -886,7 +890,16 @@ class JobProcessor:
             names = available_skills(self.settings.project_dir)
             markup = {
                 "inline_keyboard": [
-                    [{"text": name, "callback_data": f"skill:select:{name}"}]
+                    [
+                        {
+                            "text": (
+                                f"⭐ Главная роль · {name}"
+                                if name == PRIMARY_SKILL_NAME
+                                else name
+                            ),
+                            "callback_data": f"skill:select:{name}",
+                        }
+                    ]
                     for name in names
                 ]
                 + [
@@ -901,7 +914,9 @@ class JobProcessor:
             self._send_and_finish(
                 session,
                 job,
-                "# Навыки агента\n\nВыберите навык для просмотра или изменения.",
+                "# Навыки агента\n\n"
+                "Главная роль задаёт маршрутизацию. Остальные навыки используются как "
+                "рабочие модули. Выберите навык для просмотра или изменения.",
                 markup,
             )
             return

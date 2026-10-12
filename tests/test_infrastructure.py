@@ -115,3 +115,13 @@ def test_local_start_applies_database_migrations_before_bot():
     migration = script.index("-m alembic upgrade head")
     launch = script.index("-m app.local_bot")
     assert migration < launch
+
+
+def test_production_update_is_guarded_and_reuses_readiness_flow():
+    script = (ROOT / "scripts" / "server-update.sh").read_text(encoding="utf-8")
+    assert "git status --porcelain" in script
+    assert "git merge --ff-only" in script
+    assert "pg_dump" in script
+    assert "SALES_BOT_IMAGE" in script
+    assert './scripts/server-up.sh "$ENV_FILE"' in script
+    assert "Automatic rollback is intentionally disabled" in script

@@ -7,16 +7,19 @@ from sqlalchemy.orm import Session
 
 from app.models import SkillVersion
 
+PRIMARY_SKILL_NAME = "sales-core"
+
 
 def available_skills(project_dir: Path) -> list[str]:
     skills_dir = project_dir / "skills"
     if not skills_dir.is_dir():
         return []
-    return sorted(
+    names = sorted(
         path.parent.name
         for path in skills_dir.glob("*/SKILL.md")
         if path.is_file()
     )
+    return sorted(names, key=lambda name: (name != PRIMARY_SKILL_NAME, name))
 
 
 def base_skill_content(project_dir: Path, skill_name: str) -> str:

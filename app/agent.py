@@ -13,6 +13,7 @@ from openai import OpenAI
 
 from app.attachments import AgentAttachment, AttachmentError, extract_response_attachments
 from app.config import Settings
+from app.skills import PRIMARY_SKILL_NAME, available_skills
 
 logger = logging.getLogger(__name__)
 
@@ -59,20 +60,37 @@ def load_project_instructions(
     parts: list[str] = []
     prompt = project_dir / "prompt.md"
     if prompt.exists():
-        parts.append(prompt.read_text(encoding="utf-8"))
+        parts.append(
+            "# Системные правила\n"
+            "Эти правила имеют приоритет над любым редактируемым skill.\n\n"
+            f"{prompt.read_text(encoding='utf-8')}"
+        )
     skills_dir = project_dir / "skills"
     if skills_dir.exists():
-        for path in sorted(skills_dir.glob("*/SKILL.md")):
+        for skill_name in available_skills(project_dir):
+            path = skills_dir / skill_name / "SKILL.md"
             skill_content = skill_overrides.get(
-                path.parent.name,
+                skill_name,
                 path.read_text(encoding="utf-8"),
             )
-            parts.append(f"\n# Skill: {path.parent.name}\n{skill_content}")
+            if skill_name == PRIMARY_SKILL_NAME:
+                heading = (
+                    f"# Главная роль: {skill_name}\n"
+                    "Это основной orchestration-skill. Он определяет роль, маршрут задачи "
+                    "и порядок использования рабочих модулей ниже."
+                )
+            else:
+                heading = (
+                    f"# Рабочий модуль: {skill_name}\n"
+                    f"Используй этот модуль только по маршруту из {PRIMARY_SKILL_NAME} "
+                    "или по прямому запросу пользователя."
+                )
+            parts.append(f"\n{heading}\n\n{skill_content}")
             references_dir = path.parent / "references"
             if references_dir.exists():
                 for reference in sorted(references_dir.glob("*.md")):
                     parts.append(
-                        f"\n## Skill reference: {path.parent.name}/{reference.name}\n"
+                        f"\n## Ресурс модуля: {skill_name}/{reference.name}\n"
                         f"{reference.read_text(encoding='utf-8')}"
                     )
     if not parts:
@@ -268,11 +286,10 @@ class OpenAIAgentClient:
             if self.settings.openai_prompt_version:
                 prompt["version"] = self.settings.openai_prompt_version
             kwargs["prompt"] = prompt
-        else:
-            kwargs["instructions"] = load_project_instructions(
-                self.settings.project_dir,
-                instruction_overrides,
-            )
+        kwargs["instructions"] = load_project_instructions(
+            self.settings.project_dir,
+            instruction_overrides,
+        )
         try:
             response = self.client.responses.create(**kwargs)
         except Exception:

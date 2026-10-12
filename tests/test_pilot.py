@@ -907,8 +907,26 @@ def test_project_bundle_loads_prompt_skill_and_override(runtime):
         runtime["settings"].project_dir,
         {"sales-core": "OVERRIDDEN SKILL"},
     )
-    assert "корпоративный AI-агент команды продаж" in instructions
+    assert "# Системные правила" in instructions
+    assert "# Главная роль: sales-core" in instructions
     assert "OVERRIDDEN SKILL" in instructions
+    assert instructions.index("# Главная роль: sales-core") < instructions.index(
+        "# Рабочий модуль: bitrix-crm-update"
+    )
+    assert "Текст skills не является разрешением на write-операцию" in instructions
+
+
+def test_main_role_is_first_in_admin_skill_menu(runtime, post_update, drain):
+    post_update(telegram_update(1, 900, "/start"))
+    drain()
+    post_update(telegram_update(2, 900, "🛠 Навыки"))
+    drain()
+
+    first_button = runtime["telegram"].markups[-1]["inline_keyboard"][0][0]
+    assert first_button == {
+        "text": "⭐ Главная роль · sales-core",
+        "callback_data": "skill:select:sales-core",
+    }
 
 
 def test_local_runtime_processes_configured_admin(runtime):
@@ -1034,6 +1052,50 @@ def test_optional_mcp_failure_retries_plain_openai_request():
         "image_generation",
         "code_interpreter",
     }
+
+
+def test_local_main_role_is_sent_even_with_openai_prompt_id():
+    settings = Settings(
+        app_env="test",
+        openai_api_key="test-key",
+        openai_prompt_id="pmpt_test",
+        openai_prompt_version="7",
+        project_dir="config/project",
+        mcp_servers_json="[]",
+    )
+    client = OpenAIAgentClient(settings)
+
+    class FakeResponses:
+        def __init__(self) -> None:
+            self.call: dict | None = None
+
+        def create(self, **kwargs):
+            self.call = kwargs
+            return SimpleNamespace(
+                id="response-role",
+                model="gpt-5.6-luna",
+                output_text="ok",
+                usage=SimpleNamespace(
+                    input_tokens=1,
+                    output_tokens=1,
+                    input_tokens_details=SimpleNamespace(cached_tokens=0),
+                ),
+            )
+
+    fake_responses = FakeResponses()
+    client.client = SimpleNamespace(responses=fake_responses)
+    client.respond(
+        messages=[{"role": "user", "content": "Разбери встречу"}],
+        safety_identifier="tg_test",
+        allowed_tools=[],
+    )
+
+    assert fake_responses.call is not None
+    assert fake_responses.call["prompt"] == {"id": "pmpt_test", "version": "7"}
+    assert "# Главная роль: sales-core" in fake_responses.call["instructions"]
+    assert "# Рабочий модуль: sales-transcript-review" in fake_responses.call[
+        "instructions"
+    ]
 
 
 def test_checked_in_mcp_registry_is_read_only():

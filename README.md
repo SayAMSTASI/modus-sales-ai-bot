@@ -1,6 +1,10 @@
 # Modus Sales Telegram Bot — MVP
 
-Локальный Telegram-бот с OpenAI Responses API, общим набором skills и персональным доступом к Jira, Bitrix и KTalk MCP через Keycloak. Краткая инструкция для пользователя и администратора: [docs/user-guide.md](docs/user-guide.md).
+Локальный Telegram-бот с OpenAI Responses API, общим набором skills и персональным доступом к Jira, Bitrix и KTalk MCP через Keycloak.
+
+- [Инструкция пользователя](docs/user-guide.md)
+- [Инструкция администратора](docs/admin-guide.md)
+- [Инструкция DevOps](docs/devops-keycloak-deployment-runbook.md)
 
 ## Что реализовано
 
@@ -23,15 +27,16 @@
 - отдельный контекст каждого пользователя; перед `/new` пользователь обязательно
   оценивает прошлый диалог от 1 до 5;
 - общий Git-набор skills и версии из БД без перезапуска;
+- главный skill `sales-core` как роль и маршрутизатор остальных рабочих skills;
 - `/skills`, `/skill_show`, `/skill_edit`, `/skill_cancel`, `/skill_rollback` для администраторов;
 - журнал вопросов с автором, временем и результатом обработки (по умолчанию 30 дней),
   без копирования ответов агента;
 - агрегированные tokens/cost/latency/error metrics и статистика удовлетворённости;
 - двусторонние вложения: PDF, TXT, CSV, JSON, DOCX, XLSX, PPTX, JPEG, PNG и WebP
-- создание PDF, DOCX, XLSX, PPTX, CSV и TXT через OpenAI Code Interpreter с
-  автоматической отправкой результата в Telegram
   принимаются из Telegram; изображения OpenAI и файловые результаты MCP возвращаются
   пользователю как Telegram-фото или документы;
+- создание PDF, DOCX, XLSX, PPTX, CSV и TXT через OpenAI Code Interpreter с
+  автоматической отправкой результата в Telegram;
 - проверка MIME/размера, allowlist хостов скачивания и шифрование исходящих файлов,
   временно сохранённых в очереди для повторной доставки;
 - SQLite для прямого локального запуска и PostgreSQL в Docker.
@@ -168,3 +173,12 @@ docker compose --env-file .env.docker.local -f docker-compose.local.yml down
 ```bash
 ./scripts/server-up.sh /opt/modus-sales-bot/.env.production
 ```
+
+Последующие обновления кода выполняются одной guarded-командой: fast-forward из Git,
+backup PostgreSQL, immutable image tag, миграция и readiness:
+
+```bash
+./scripts/server-update.sh /opt/modus-sales-bot/.env.production origin/main
+```
+
+Редакция главной роли или другого skill через Telegram применяется без перезапуска.

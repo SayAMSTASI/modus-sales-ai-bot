@@ -277,6 +277,17 @@ docker compose --env-file "$ENV_FILE" logs --tail 200 web worker
 
 Не менять `TOKEN_ENCRYPTION_KEY` при обычном рестарте или обновлении.
 
+Для повторного развёртывания использовать guarded-скрипт:
+
+```bash
+./scripts/server-update.sh /opt/modus-sales-bot/.env.production origin/main
+```
+
+Он допускает только fast-forward Git update, делает `pg_dump`, помечает образ Git SHA
+и повторяет миграцию, readiness, Keycloak check и webhook registration. Перед первым
+применением DevOps должен проверить права на каталог `deploy-state`, свободное место
+для backup и обратную совместимость миграций.
+
 ## 12. Что DevOps должен вернуть разработчику
 
 Без секретов:
